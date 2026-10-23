@@ -1,0 +1,17 @@
+wallpaper = "@PREFIX@/share/colibry/wallpapers/default.jpg"
+wallpaper_fit = "cover"
+cursor_theme = "Adwaita"
+cursor_size = 24
+terminal = "foot"
+follow_mouse = 1
+shadow_enabled = 1
+shadow_offset_x = 0
+shadow_offset_y = 12
+shadow_radius = 24
+shadow_rounding = 8
+shadow_opacity = 0.45
+titlebar_height = 32
+titlebar_button_width = 46
+titlebar_font = "/path/to/font.ttf"
+monitors = ["eDP-1,1920x1200,1", ",preferred,1.5"]
+bind = ["SUPER+B=exec:firefox"]
