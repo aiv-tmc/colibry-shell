@@ -1,15 +1,18 @@
 // wl_surface implementation for the Colibry compositor.
 //
 // CSurface tracks the double-buffered state of one client surface: pending
-// and current buffers, damage regions and frame callbacks. commit() swaps
+// and current buffers (shared memory CBuffer or dmabuf attributes received
+// through linux-dmabuf), damage regions and frame callbacks. commit() swaps
 // the pending state into the current state and notifies the desktop layer
-// through a commit hook.
+// through a commit hook. Surfaces may be subsurfaces of a parent, carrying
+// a position offset and a stacking order within the parent.
 
 #pragma once
 
 #include "Buffer.hpp"
 
 #include <hyprutils/math/Region.hpp>
+#include <hyprutils/math/Vector2D.hpp>
 #include <hyprutils/memory/SharedPtr.hpp>
 
 #include <functional>
@@ -20,34 +23,44 @@ namespace Colibry {
 
     class CDisplay;
 
+    // Dmabuf plane attributes attached to a surface commit.
+    struct SSurfaceDMA {
+        bool     valid = false;
+        int      fd    = -1; // borrowed, owned by the wl_buffer resource
+        uint32_t width = 0, height = 0, format = 0;
+        uint64_t modifier = 0;
+        uint32_t stride = 0, offset = 0;
+    };
+
     class CSurface {
       public:
-        // wl_compositor.create_surface handler. The compositor resource user
-        // data carries the owning CDisplay.
         static void create(wl_client* client, wl_resource* compositor, uint32_t id);
 
-        // Destroys the surface resource and removes it from the display.
         void destroyResource();
 
-        // The underlying wl_surface resource.
         wl_resource* resource() const;
 
-        // Current buffer applied by the last commit; null when unmapped.
         Hyprutils::Memory::CSharedPointer<CBuffer> currentBuffer() const;
-        // Damage accumulated since the last compositor frame, in
-        // buffer-local coordinates.
-        const Hyprutils::Math::CRegion& damage() const;
-        // True when the surface has a committed buffer.
-        bool mapped() const;
+        const Hyprutils::Math::CRegion&            damage() const;
+        bool                                       mapped() const;
 
-        // Sends 'done' to all pending frame callbacks and destroys them.
+        // Dmabuf content of the current commit.
+        const SSurfaceDMA& currentDMA() const;
+
         void sendFrameDone(uint32_t timeMs);
-        // Clears the accumulated damage after the frame was rendered.
         void clearDamage();
-        // Releases the current buffer once the compositor copied its pixels.
         void releaseBuffer();
 
-        // Called by the desktop layer (window code) for every commit.
+        CSurface* parent() const;
+        void      attachSubsurface(CSurface* parent);
+        void      detachSubsurface();
+        const std::vector<CSurface*>& subsurfaces() const;
+        void                          addSubsurface(CSurface* sub);
+        void                          removeSubsurface(CSurface* sub);
+        void                          raiseSubsurface(CSurface* sub, CSurface* sibling, bool above);
+        Hyprutils::Math::Vector2D     subsurfaceOffset() const;
+        void                          setSubsurfaceOffset(int32_t x, int32_t y);
+
         std::function<void(CSurface*)> onCommit;
 
       private:
@@ -63,25 +76,30 @@ namespace Colibry {
         static void setBufferTransform(wl_client* client, wl_resource* resource, int32_t transform);
         static void setBufferScale(wl_client* client, wl_resource* resource, int32_t scale);
         static void damageBuffer(wl_client* client, wl_resource* resource, int32_t x, int32_t y, int32_t w, int32_t h);
+        static void offset(wl_client* client, wl_resource* resource, int32_t x, int32_t y);
 
         wl_resource* m_resource = nullptr;
         CDisplay*    m_display  = nullptr;
 
-        // Owning self reference kept alive by the display list and this
-        // member; reset when the resource is destroyed.
         Hyprutils::Memory::CSharedPointer<CSurface> m_self;
 
-        // Double-buffered state.
         Hyprutils::Memory::CSharedPointer<CBuffer> m_pendingBuffer;
         Hyprutils::Memory::CSharedPointer<CBuffer> m_currentBuffer;
         Hyprutils::Math::CRegion                   m_pendingDamage;
         Hyprutils::Math::CRegion                   m_damage;
 
-        // Frame callbacks requested since the last commit.
+        SSurfaceDMA m_pendingDMA;
+        SSurfaceDMA m_currentDMA;
+
         std::vector<wl_resource*> m_pendingFrameCallbacks;
         std::vector<wl_resource*> m_frameCallbacks;
 
-        bool m_mapped = false;
+        CSurface*                 m_parent = nullptr;
+        std::vector<CSurface*>    m_subsurfaces;
+        Hyprutils::Math::Vector2D m_subsurfaceOffset;
+
+        bool m_foreignBuffer = false;
+        bool m_mapped        = false;
     };
 
 }

@@ -6,6 +6,7 @@
 #include "ForeignToplevel.hpp"
 #include "OutputInfo.hpp"
 #include "Region.hpp"
+#include "Subcompositor.hpp"
 #include "Surface.hpp"
 
 #include <wayland-server-protocol.h>
@@ -14,12 +15,30 @@
 
 namespace Colibry {
 
+    // Logs every client connection; used to trace which stage of the
+    // protocol handshake a stuck client reached.
+    static void onClientCreated(wl_listener* listener, void* data) {
+        const auto client = static_cast<wl_client*>(data);
+
+        pid_t pid = 0;
+        wl_client_get_credentials(client, &pid, nullptr, nullptr);
+
+        std::fprintf(stderr, "[colibry] client connected (pid %d)\n", (int)pid);
+    }
+
+    static wl_listener* clientCreatedListener() {
+        static wl_listener listener = {.link = {nullptr, nullptr}, .notify = &onClientCreated};
+        return &listener;
+    }
+
     bool CDisplay::init() {
         m_display = wl_display_create();
         if (!m_display) {
             std::fprintf(stderr, "[colibry] failed to create wl_display\n");
             return false;
         }
+
+        wl_display_add_client_created_listener(m_display, clientCreatedListener());
 
         m_compositorGlobal = wl_global_create(m_display, &wl_compositor_interface, 6, this, &CDisplay::bindCompositor);
         if (!m_compositorGlobal) {
@@ -33,8 +52,11 @@ namespace Colibry {
             return false;
         }
 
-        // Output description globals (one per backend output, announced
-        // later) and the foreign toplevel manager for panels.
+        // wl_subcompositor is required by the GTK and Qt toolkits; without
+        // it toolkit applications refuse to open the display.
+        if (!CSubcompositor::get().init(this))
+            std::fprintf(stderr, "[colibry] wl_subcompositor unavailable\n");
+
         COutputInfo::get().init(this);
         if (!CForeignToplevelManager::get().init(this))
             std::fprintf(stderr, "[colibry] foreign toplevel management unavailable\n");
@@ -67,9 +89,7 @@ namespace Colibry {
     }
 
     void CDisplay::dispatch() {
-        // Handles new clients, requests and timer/idle sources.
         wl_event_loop_dispatch(wl_display_get_event_loop(m_display), 0);
-        // Flushes replies and events to every connected client.
         wl_display_flush_clients(m_display);
     }
 
@@ -100,6 +120,8 @@ namespace Colibry {
     }
 
     void CDisplay::bindCompositor(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        std::fprintf(stderr, "[colibry] client bound wl_compositor\n");
+
         const auto self = static_cast<CDisplay*>(data);
 
         const auto resource = wl_resource_create(client, &wl_compositor_interface, version, id);
@@ -113,8 +135,6 @@ namespace Colibry {
             .create_region  = [](wl_client* c, wl_resource* res, uint32_t regionId) { CRegionResource::create(c, res, regionId); },
         };
 
-        // The resource user data carries the display so surface creation can
-        // register new surfaces with it.
         wl_resource_set_implementation(resource, &IMPLEMENTATION, self, nullptr);
     }
 

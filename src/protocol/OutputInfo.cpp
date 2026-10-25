@@ -38,7 +38,6 @@ namespace Colibry {
     void COutputInfo::removeOutput(const std::string& name) {
         for (auto it = m_outputs.begin(); it != m_outputs.end(); ++it) {
             if ((*it)->name == name) {
-                // Destroying the global invalidates every client resource.
                 wl_global_destroy((*it)->global);
                 delete *it;
                 m_outputs.erase(it);
@@ -62,6 +61,8 @@ namespace Colibry {
     }
 
     void COutputInfo::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        std::fprintf(stderr, "[colibry] client bound wl_output\n");
+
         const auto output = static_cast<SOutput*>(data);
 
         const auto resource = wl_resource_create(client, &wl_output_interface, version, id);
@@ -79,8 +80,6 @@ namespace Colibry {
             std::erase(output->resources, res);
         });
 
-        // Static output description: no physical size, one mode at 60 Hz,
-        // scale 1.
         wl_output_send_geometry(resource, 0, 0, 0, 0, WL_OUTPUT_SUBPIXEL_UNKNOWN, "colibry", output->name.c_str(), WL_OUTPUT_TRANSFORM_NORMAL);
         wl_output_send_mode(resource, WL_OUTPUT_MODE_CURRENT, (int32_t)output->size.x, (int32_t)output->size.y, 60000);
 

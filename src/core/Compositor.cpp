@@ -3,33 +3,53 @@
 #include "Compositor.hpp"
 
 #include "../config/ConfigManager.hpp"
+#include "../desktop/ChromeGeom.hpp"
+#include "../desktop/Cursor.hpp"
+#include "../desktop/DragManager.hpp"
 #include "../desktop/Keybinds.hpp"
-#include "../desktop/Layout.hpp"
-#include "../desktop/Shadow.hpp"
-#include "../desktop/TitleBar.hpp"
+#include "../desktop/Launcher.hpp"
+#include "../desktop/Window.hpp"
 #include "../ipc/IPC.hpp"
 #include "../protocol/DataDevice.hpp"
+#include "../protocol/Display.hpp"
 #include "../protocol/ForeignToplevel.hpp"
 #include "../protocol/OutputInfo.hpp"
+#include "../protocol/Seat.hpp"
 #include "../protocol/Surface.hpp"
+#include "../protocol/XdgShell.hpp"
+#include "../render/GLCompositor.hpp"
+#include "../render/SceneDraw.hpp"
+#include "../render/SolidRenderer.hpp"
+#include "../wallpaper/WallpaperEngine.hpp"
+
+#include <aquamarine/backend/Backend.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include <poll.h>
 #include <unistd.h>
 
 namespace Colibry {
 
-    // Scheduler tick in milliseconds: short enough that accumulated damage
-    // is picked up almost immediately, while commit pacing stays at the
-    // display refresh period.
-    static constexpr uint64_t FRAME_INTERVAL_MS = 4;
+    using Hyprutils::Math::CBox;
+    using Hyprutils::Math::CRegion;
+    using Hyprutils::Math::Vector2D;
 
-    static constexpr int MAX_WORKSPACE = 10;
+    static constexpr uint64_t FRAME_INTERVAL_MS = 4;
+    static constexpr int      MAX_WORKSPACE     = 10;
+
+    static uint64_t s_lastTickMs = 0;
 
     static volatile sig_atomic_t g_framePresented = 0;
+
+    static uint64_t nowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
 
     static const char* logPrefix(Aquamarine::eBackendLogLevel level) {
         switch (level) {
@@ -48,22 +68,22 @@ namespace Colibry {
         std::fprintf(stderr, "[colibry backend:%s] %s\n", logPrefix(level), message.c_str());
     }
 
-    static void watchdogHandler(int /*sig*/) {
+    static void watchdogHandler(int) {
         static const char MSG[] = "[colibry] watchdog: no frame presented at startup, exiting\n";
         write(STDERR_FILENO, MSG, sizeof(MSG) - 1);
         _exit(1);
     }
 
     static std::string resolveTerminal() {
-        const char* env = std::getenv("COLIBRY_TERMINAL");
-        if (env && *env)
-            return env;
+        if (const char* env = std::getenv("COLIBRY_TERMINAL"))
+            if (*env)
+                return env;
 
         const auto& configured = CConfigManager::get().terminal();
         if (!configured.empty())
             return configured;
 
-        return "foot || kitty || alacritty || xterm || weston-terminal";
+        return "ghostty || foot || kitty || alacritty || xterm || weston-terminal";
     }
 
     static void spawnAutostart(const CDisplay* display) {
@@ -78,7 +98,7 @@ namespace Colibry {
 
         execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
 
-        std::fprintf(stderr, "[colibry] no terminal found; install one (pacman -S foot) or set terminal= in colibry.toml\n");
+        std::fprintf(stderr, "[colibry] no terminal found; set terminal= in colibry.toml\n");
         _exit(1);
     }
 
@@ -87,8 +107,33 @@ namespace Colibry {
         return s_instance;
     }
 
+    CCompositor::CCompositor()  = default;
+    CCompositor::~CCompositor() = default;
+
+    Hyprutils::Memory::CSharedPointer<CClearRenderer> CCompositor::renderer() {
+        if (m_renderer)
+            return m_renderer;
+
+        if (!m_backend || !m_backend->primaryAllocator) {
+            std::fprintf(stderr, "[colibry] no DRM allocator available\n");
+            return nullptr;
+        }
+
+        m_renderer = Hyprutils::Memory::makeShared<CClearRenderer>();
+        if (!m_renderer->init(m_backend->primaryAllocator->drmFD())) {
+            std::fprintf(stderr, "[colibry] failed to initialize the buffer factory\n");
+            m_renderer.reset();
+        }
+
+        return m_renderer;
+    }
+
     void CCompositor::requestExit() {
         get().m_eventLoop.quit();
+    }
+
+    bool CCompositor::isShuttingDown() const {
+        return m_shutdown;
     }
 
     void CCompositor::notifyFramePresented() {
@@ -96,20 +141,33 @@ namespace Colibry {
         alarm(0);
     }
 
-    std::vector<Aquamarine::SBackendImplementationOptions> CCompositor::backendOptions() const {
-        Aquamarine::SBackendImplementationOptions drm;
-        drm.backendType        = Aquamarine::AQ_BACKEND_DRM;
-        drm.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+    uint64_t CCompositor::startMs() const {
+        return m_startMs;
+    }
 
-        Aquamarine::SBackendImplementationOptions wayland;
-        wayland.backendType        = Aquamarine::AQ_BACKEND_WAYLAND;
-        wayland.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+    uint64_t CCompositor::currentMs() const {
+        return nowMs();
+    }
 
-        return {drm, wayland};
+    double CCompositor::fadeFactor(uint64_t now) const {
+        const int fadeMs = m_config ? m_config->loginFadeMs() : 750;
+        if (fadeMs <= 0)
+            return 1.0;
+
+        const double t = std::clamp((double)(now - m_startMs) / (double)fadeMs, 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    }
+
+    bool CCompositor::inputLocked() const {
+        const int fadeMs  = m_config ? m_config->loginFadeMs() : 750;
+        const int extraMs = m_config ? m_config->loginUnlockMs() : 250;
+        return nowMs() < m_startMs + (uint64_t)fadeMs + (uint64_t)extraMs;
     }
 
     bool CCompositor::init() {
         std::fprintf(stderr, "[colibry] starting compositor %s\n", COLIBRY_VERSION);
+
+        m_startMs = nowMs();
 
         m_config = Hyprutils::Memory::makeShared<CConfigManager>();
         m_config->load();
@@ -122,15 +180,10 @@ namespace Colibry {
         if (!m_config->wallpaperPath().empty())
             m_wallpaper->load(m_config->wallpaperPath());
 
-        m_shadow = Hyprutils::Memory::makeShared<CShadow>();
-        m_shadow->configure(m_config->shadowEnabled(), 0xFF000000, m_config->shadowOffsetX(), m_config->shadowOffsetY(), m_config->shadowRadius(),
-                            m_config->shadowRounding(), m_config->shadowOpacity());
-
-        TitleBar::configure(m_config->titlebarHeight(), m_config->titlebarButtonWidth());
-        TitleBar::initFont(m_config->titlebarFont());
-
         m_cursor = Hyprutils::Memory::makeShared<CCursor>();
         m_cursor->load(m_config->cursorTheme(), m_config->cursorSize());
+        m_cursor->setSpeed(m_config->cursorSpeed());
+        m_cursor->setCornerRadius(m_config->screenRounding());
 
         m_display = Hyprutils::Memory::makeShared<CDisplay>();
         if (!m_display->init()) {
@@ -153,12 +206,20 @@ namespace Colibry {
         if (!CDataDeviceManager::get().init(m_display.get()))
             std::fprintf(stderr, "[colibry] clipboard unavailable\n");
 
+        Aquamarine::SBackendImplementationOptions drm;
+        drm.backendType        = Aquamarine::AQ_BACKEND_DRM;
+        drm.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+
+        Aquamarine::SBackendImplementationOptions wayland;
+        wayland.backendType        = Aquamarine::AQ_BACKEND_WAYLAND;
+        wayland.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+
         Aquamarine::SBackendOptions options;
         options.logFunction = backendLog;
 
-        m_backend = Aquamarine::CBackend::create(backendOptions(), options);
+        m_backend = Aquamarine::CBackend::create({drm, wayland}, options);
         if (!m_backend) {
-            std::fprintf(stderr, "[colibry] failed to create backend\n");
+            std::fprintf(stderr, "[colibry] failed to create the backend\n");
             return false;
         }
 
@@ -175,25 +236,88 @@ namespace Colibry {
         });
 
         if (!m_backend->start()) {
-            std::fprintf(stderr, "[colibry] failed to start backend\n");
+            std::fprintf(stderr, "[colibry] failed to start the backend\n");
             return false;
         }
 
-        if (m_backend->hasSession())
-            std::fprintf(stderr, "[colibry] DRM session acquired\n");
-        else
-            std::fprintf(stderr, "[colibry] running without a DRM session (nested mode)\n");
+        // The GPU renderer needs the DRM node of the KMS backend.
+        if (!m_backend->primaryAllocator) {
+            std::fprintf(stderr, "[colibry] GPU rendering unavailable; nested sessions are not supported\n");
+            return false;
+        }
+
+        if (!CGLCompositor::get().init(m_backend->primaryAllocator->drmFD())) {
+            std::fprintf(stderr, "[colibry] GPU renderer failed to initialize\n");
+            return false;
+        }
+
+        CGLCompositor::get().setScreenRounding(m_config->screenRounding());
+        if (!SceneDraw::initTitleFont(m_config->titlebarFont().c_str()))
+            std::fprintf(stderr, "[colibry] titlebar font unavailable; titles will be blank\n");
+
+        if (!CLauncher::get().init())
+            std::fprintf(stderr, "[colibry] launcher: no applications found\n");
 
         registerPollFDs();
 
         m_eventLoop.addFD(m_display->fd(), POLLIN | POLLOUT, [this](short) { m_display->dispatch(); });
 
+        // Frame tick: advances cursor smoothing, window open animations,
+        // cloth physics and closing fades, then presents outputs with
+        // pending damage.
         m_eventLoop.addTimer(FRAME_INTERVAL_MS, [] {
             auto& self = get();
+
+            const auto now = nowMs();
+            const auto dt  = s_lastTickMs ? now - s_lastTickMs : (uint64_t)FRAME_INTERVAL_MS;
+            s_lastTickMs   = now;
+
+            bool animating = self.m_cursor->step(now);
+
+            CDragManager::get().stepSprings((double)dt);
+
+            const uint64_t animMs = std::max<uint64_t>(1, self.m_config->openAnimMs());
+            std::vector<CWindow*> expired;
+
+            for (const auto& window : self.m_windows) {
+                if (window->clothStep((double)dt))
+                    animating = true;
+
+                if (window->closeExpired(now))
+                    expired.push_back(window.get());
+
+                const double progress = window->openProgress();
+                if (progress >= 1.0 || !window->mapped())
+                    continue;
+                window->setOpenProgress(std::min(1.0, progress + (double)dt / (double)animMs));
+                animating = true;
+            }
+
+            // Clients that ignored the close request are removed by force.
+            for (auto* window : expired)
+                self.removeWindow(window);
+
             for (const auto& output : self.m_outputs) {
-                if (output->needsRender())
+                if (output->needsRender() || animating)
                     output->present();
             }
+        });
+
+        // Liveness heal: re-announces backend descriptors and forces a full
+        // redraw after a long stall (for example a VT switch).
+        m_eventLoop.addTimer(2000, [] {
+            auto& self = get();
+
+            self.registerPollFDs();
+
+            const auto now   = nowMs();
+            bool       stale = false;
+            for (const auto& output : self.m_outputs) {
+                if (now - output->lastCommitMs() > 1500)
+                    stale = true;
+            }
+            if (stale)
+                self.addFullDamage();
         });
 
         m_ipc = Hyprutils::Memory::makeShared<CIPC>();
@@ -208,290 +332,49 @@ namespace Colibry {
         return true;
     }
 
-    Hyprutils::Memory::CSharedPointer<CClearRenderer> CCompositor::renderer() {
-        if (m_renderer)
-            return m_renderer;
-
-        if (!m_backend || !m_backend->primaryAllocator)
-            return nullptr;
-
-        m_renderer = Hyprutils::Memory::makeShared<CClearRenderer>();
-        if (!m_renderer->init(m_backend->primaryAllocator->drmFD())) {
-            std::fprintf(stderr, "[colibry] failed to initialize the renderer\n");
-            m_renderer.reset();
-        }
-
-        return m_renderer;
-    }
-
-    CSurface* CCompositor::surfaceAt(Hyprutils::Math::Vector2D pos) {
-        for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
-            const auto& window = *it;
-            if (!window->visible())
-                continue;
-
-            const auto wpos  = window->position();
-            const auto wsize = window->size();
-
-            if (pos.x >= wpos.x && pos.x < wpos.x + wsize.x && pos.y >= wpos.y + TitleBar::height() && pos.y < wpos.y + wsize.y + TitleBar::height())
-                return window->surface();
-        }
-
-        return nullptr;
-    }
-
-    void CCompositor::focusWindow(CWindow* window) {
-        if (m_focusedWindow == window)
-            return;
-
-        CWindow* previous = m_focusedWindow;
-
-        m_focusedWindow = window;
-        m_seat->setKeyboardFocus(window ? window->surface() : nullptr);
-
-        if (previous) {
-            addDamage(windowBox(previous));
-            CForeignToplevelManager::get().onWindowState(previous);
-        }
-        if (window) {
-            addDamage(windowBox(window));
-            CForeignToplevelManager::get().onWindowState(window);
-
-            for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
-                if (it->get() == window) {
-                    auto raised = *it;
-                    m_windows.erase(it);
-                    m_windows.push_back(raised);
-                    break;
-                }
-            }
-        }
-
-        requestRender();
-    }
-
-    void CCompositor::focusSurface(CSurface* surface) {
-        if (!surface)
-            return;
-
-        for (const auto& window : m_windows) {
-            if (window->surface() == surface && window->visible()) {
-                focusWindow(window.get());
-                return;
-            }
-        }
-    }
-
-    void CCompositor::focusNext() {
-        for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
-            if (!(*it)->visible())
-                continue;
-            if (it->get() == m_focusedWindow)
-                continue;
-
-            if (m_focusedWindow) {
-                auto after = std::find_if(m_windows.rbegin(), m_windows.rend(), [this](const auto& w) { return w.get() == m_focusedWindow; });
-                if (after != m_windows.rend()) {
-                    auto next = after + 1;
-                    if (next == m_windows.rend())
-                        next = m_windows.rbegin();
-                    (*next)->setMinimized(false);
-                    focusWindow(next->get());
-                    return;
-                }
-            }
-
-            (*it)->setMinimized(false);
-            focusWindow(it->get());
-            return;
-        }
-
-        focusWindow(nullptr);
-    }
-
-    void CCompositor::focusPrev() {
-        for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
-            if (!(*it)->visible())
-                continue;
-            if (it->get() == m_focusedWindow)
-                continue;
-
-            if (m_focusedWindow) {
-                auto after = std::find_if(m_windows.begin(), m_windows.end(), [this](const auto& w) { return w.get() == m_focusedWindow; });
-                if (after != m_windows.end()) {
-                    auto next = after + 1;
-                    if (next == m_windows.end())
-                        next = m_windows.begin();
-                    (*next)->setMinimized(false);
-                    focusWindow(next->get());
-                    return;
-                }
-            }
-
-            (*it)->setMinimized(false);
-            focusWindow(it->get());
-            return;
-        }
-
-        focusWindow(nullptr);
-    }
-
-    void CCompositor::removeWindow(CWindow* window) {
-        if (m_shadow)
-            m_shadow->invalidate(window);
-
-        if (m_focusedWindow == window) {
-            m_focusedWindow = nullptr;
-            m_seat->setKeyboardFocus(nullptr);
-        }
-
-        for (auto it = m_windows.begin(); it != m_windows.end(); ++it) {
-            if (it->get() == window) {
-                m_windows.erase(it);
-                break;
-            }
-        }
-
-        addFullDamage();
-    }
-
-    int CCompositor::currentWorkspace() const {
-        return m_currentWorkspace;
-    }
-
-    void CCompositor::switchWorkspace(int workspace) {
-        workspace = std::clamp(workspace, 1, MAX_WORKSPACE);
-        if (workspace == m_currentWorkspace)
-            return;
-
-        m_currentWorkspace = workspace;
-        std::fprintf(stderr, "[colibry] workspace %d\n", workspace);
-
-        CWindow* top = nullptr;
-        for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
-            if ((*it)->visible()) {
-                top = it->get();
-                break;
-            }
-        }
-        focusWindow(top);
-
-        applyTiling();
-        refreshForeignToplevel();
-        addFullDamage();
-    }
-
-    void CCompositor::moveWindowToWorkspace(CWindow* window, int workspace) {
-        if (!window)
-            return;
-
-        workspace = std::clamp(workspace, 1, MAX_WORKSPACE);
-        window->setWorkspace(workspace);
-
-        if (workspace == m_currentWorkspace)
-            applyTiling();
-        addFullDamage();
-    }
-
-    bool CCompositor::workspaceHasTiling(int workspace) const {
-        for (const auto& window : m_windows) {
-            if (window->workspace() == workspace && window->isTiling())
-                return true;
-        }
-        return false;
-    }
-
-    int CCompositor::firstEmptyWorkspace() const {
-        for (int candidate = 1; candidate <= MAX_WORKSPACE; ++candidate) {
-            bool empty = true;
-            for (const auto& window : m_windows) {
-                if (window->mapped() && window->workspace() == candidate) {
-                    empty = false;
-                    break;
-                }
-            }
-            if (empty)
-                return candidate;
-        }
-        return MAX_WORKSPACE;
-    }
-
-    void CCompositor::applyTiling() {
-        Layout::applyTiling();
-    }
-
-    void CCompositor::refreshForeignToplevel() {
-        for (const auto& window : m_windows)
-            CForeignToplevelManager::get().onWindowState(window.get());
-    }
-
-    void CCompositor::addDamage(const Hyprutils::Math::CBox& box) {
-        m_damage.add(box);
-        requestRender();
-    }
-
-    void CCompositor::addFullDamage() {
-        for (const auto& output : m_outputs) {
-            output->invalidateBackground();
-            output->scheduleRender();
-        }
-        m_damage.add(Hyprutils::Math::CBox({0, 0}, {100000, 100000}));
-    }
-
-    Hyprutils::Math::CRegion CCompositor::takeDamage() {
-        // Returns exactly the accumulated region (possibly empty) and
-        // clears it; an empty region means nothing needs redrawing.
-        Hyprutils::Math::CRegion taken = m_damage;
-        m_damage.clear();
-        return taken;
-    }
-
-    Hyprutils::Math::CBox CCompositor::windowBox(const CWindow* window) const {
-        if (window->isFullscreen())
-            return {window->position().x, window->position().y, window->size().x, window->size().y};
-
-        return {window->position().x, window->position().y, window->size().x, window->size().y + TitleBar::height()};
-    }
-
-    void CCompositor::requestRender() {
-        for (const auto& output : m_outputs)
-            output->scheduleRender();
-    }
-
     void CCompositor::registerPollFDs() {
-        for (const auto& pollFD : m_backend->getPollFDs()) {
+        for (const auto& pollFD : m_backend->getPollFDs())
             m_eventLoop.addFD(pollFD->fd, POLLIN, [pollFD](short) { pollFD->onSignal(); });
-        }
     }
 
     void CCompositor::onNewOutput(Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> output) {
         std::fprintf(stderr, "[colibry] output '%s' appeared\n", output->name.c_str());
 
-        auto ctx = Hyprutils::Memory::makeShared<COutput>(output);
+        const auto ctx = Hyprutils::Memory::makeShared<COutput>(output);
 
-        if (ctx->setup()) {
-            COutputInfo::get().addOutput(output->name, ctx->size());
-
-            if (m_outputs.empty()) {
-                m_cursor->setBounds(ctx->size());
-                m_cursor->setPosition(ctx->size() / 2.0);
-                m_cursor->snapRender();
-            }
-            m_outputs.push_back(ctx);
+        if (!ctx->setup()) {
+            std::fprintf(stderr, "[colibry] failed to set up output %s\n", output->name.c_str());
+            return;
         }
+
+        COutputInfo::get().addOutput(output->name, ctx->size());
+
+        if (m_outputs.empty()) {
+            m_cursor->setBounds(ctx->size());
+            m_cursor->setPosition(ctx->size() / 2.0);
+            m_cursor->snapRender();
+            addFullDamage();
+        }
+
+        m_outputs.push_back(ctx);
     }
 
     int CCompositor::run() {
         std::signal(SIGINT, [](int) { requestExit(); });
         std::signal(SIGTERM, [](int) { requestExit(); });
 
+        std::signal(SIGSEGV, [](int) { _exit(139); });
+        std::signal(SIGABRT, [](int) { _exit(134); });
+        std::signal(SIGBUS, [](int) { _exit(135); });
+
         std::signal(SIGALRM, watchdogHandler);
         if (!g_framePresented)
             alarm(20);
 
         std::fprintf(stderr, "[colibry] entering event loop\n");
-
-        return m_eventLoop.run();
+        const int code = m_eventLoop.run();
+        m_shutdown     = true;
+        return code;
     }
 
     void CCompositor::shutdown() {
@@ -503,13 +386,265 @@ namespace Colibry {
         m_renderer.reset();
         m_xdgShell.reset();
         m_seat.reset();
-        m_shadow.reset();
         m_cursor.reset();
         m_wallpaper.reset();
         if (m_display)
             m_display->destroy();
         m_display.reset();
         m_backend.reset();
+    }
+
+    void CCompositor::requestRender() {
+        for (const auto& output : m_outputs)
+            output->scheduleRender();
+    }
+
+    void CCompositor::addDamage(const CBox& box) {
+        m_damage.add(box);
+        requestRender();
+    }
+
+    void CCompositor::addFullDamage() {
+        m_damage.add(CBox({0, 0}, {100000, 100000}));
+        requestRender();
+    }
+
+    CRegion CCompositor::takeDamage() {
+        CRegion taken = m_damage;
+        m_damage.clear();
+        return taken;
+    }
+
+    void CCompositor::raise(CWindow* window, bool mapped) {
+        const auto it = std::find_if(m_windows.begin(), m_windows.end(), [window](const auto& w) { return w.get() == window; });
+        if (it == m_windows.end())
+            return;
+
+        if (mapped)
+            addDamage(windowBox(window));
+
+        const auto windowRef = *it;
+        m_windows.erase(it);
+        m_windows.push_back(windowRef);
+
+        if (mapped)
+            addDamage(windowBox(window));
+    }
+
+    CBox CCompositor::windowBox(CWindow* window) const {
+        const auto pos  = window->position();
+        const auto size = window->size();
+        return CBox(pos, {size.x, size.y + (window->isFullscreen() ? 0.0 : (double)ChromeGeom::height())});
+    }
+
+    void CCompositor::focusWindow(CWindow* window) {
+        if (m_focusedWindow == window) {
+            if (window)
+                raise(window, true);
+            return;
+        }
+
+        if (m_focusedWindow)
+            addDamage(windowBox(m_focusedWindow));
+
+        m_focusedWindow = window;
+
+        if (window) {
+            raise(window, true);
+            m_seat->setKeyboardFocus(window->surface());
+            addDamage(windowBox(window));
+        } else
+            m_seat->setKeyboardFocus(nullptr);
+
+        refreshForeignToplevel();
+        requestRender();
+    }
+
+    void CCompositor::focusNext() {
+        std::vector<CWindow*> candidates;
+        for (const auto& w : m_windows)
+            if (w->visible())
+                candidates.push_back(w.get());
+
+        if (candidates.empty()) {
+            focusWindow(nullptr);
+            return;
+        }
+
+        const auto it = std::find(candidates.begin(), candidates.end(), m_focusedWindow);
+        if (it == candidates.end()) {
+            focusWindow(candidates.front());
+            return;
+        }
+
+        const size_t next = (std::distance(candidates.begin(), it) + 1) % candidates.size();
+        candidates[next]->setMinimized(false);
+        focusWindow(candidates[next]);
+    }
+
+    void CCompositor::focusPrev() {
+        std::vector<CWindow*> candidates;
+        for (const auto& w : m_windows)
+            if (w->visible())
+                candidates.push_back(w.get());
+
+        if (candidates.empty()) {
+            focusWindow(nullptr);
+            return;
+        }
+
+        const auto it = std::find(candidates.begin(), candidates.end(), m_focusedWindow);
+        if (it == candidates.end()) {
+            focusWindow(candidates.back());
+            return;
+        }
+
+        const size_t next = (std::distance(candidates.begin(), it) + candidates.size() - 1) % candidates.size();
+        candidates[next]->setMinimized(false);
+        focusWindow(candidates[next]);
+    }
+
+    void CCompositor::removeWindow(CWindow* window) {
+        if (window->surface())
+            CGLCompositor::get().dropSurface(window->surface());
+
+        const auto it = std::find_if(m_windows.begin(), m_windows.end(), [window](const auto& w) { return w.get() == window; });
+        if (it != m_windows.end()) {
+            addDamage(windowBox(window));
+            m_windows.erase(it);
+        }
+
+        if (m_focusedWindow == window) {
+            m_focusedWindow = nullptr;
+            for (auto rit = m_windows.rbegin(); rit != m_windows.rend(); ++rit) {
+                if ((*rit)->visible()) {
+                    focusWindow(rit->get());
+                    return;
+                }
+            }
+            m_seat->setKeyboardFocus(nullptr);
+        }
+
+        refreshForeignToplevel();
+        requestRender();
+    }
+
+    CSurface* CCompositor::surfaceAt(const Vector2D& pos) const {
+        for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
+            if (!(*it)->visible())
+                continue;
+
+            const auto wpos  = (*it)->position();
+            const auto wsize = (*it)->size();
+
+            if (pos.x >= wpos.x && pos.x < wpos.x + wsize.x && pos.y >= wpos.y + ChromeGeom::height() && pos.y < wpos.y + wsize.y + ChromeGeom::height())
+                return (*it)->surface();
+        }
+        return nullptr;
+    }
+
+    void CCompositor::moveWindowToWorkspace(CWindow* window, int workspace) {
+        const bool wasFocused = m_focusedWindow == window;
+        window->setWorkspace(workspace);
+        if (wasFocused) {
+            m_focusedWindow = nullptr;
+            m_seat->setKeyboardFocus(nullptr);
+        }
+        addFullDamage();
+        focusOnWorkspace(m_currentWorkspace);
+    }
+
+    void CCompositor::switchWorkspace(int workspace) {
+        while (m_currentWorkspace != workspace) {
+            if (m_currentWorkspace < workspace)
+                m_currentWorkspace = m_currentWorkspace % MAX_WORKSPACE + 1;
+            else
+                m_currentWorkspace = m_currentWorkspace - 1 < 1 ? MAX_WORKSPACE : m_currentWorkspace - 1;
+        }
+
+        applyTiling();
+        focusOnWorkspace(workspace);
+        addFullDamage();
+    }
+
+    void CCompositor::applyTiling() {
+        std::vector<CWindow*> tiling;
+        for (const auto& w : m_windows)
+            if (w->visible() && w->isTiling())
+                tiling.push_back(w.get());
+
+        if (tiling.empty())
+            return;
+
+        const auto screen = m_outputs.empty() ? Vector2D(1920, 1080) : m_outputs.front()->size();
+        const auto work   = Vector2D(screen.x, screen.y - ChromeGeom::height());
+
+        if (tiling.size() == 1) {
+            tiling.front()->setPosition({0, 0});
+            tiling.front()->configure(Vector2D(work.x, work.y), {});
+            tiling.front()->resizeTo(Vector2D(work.x, work.y));
+            return;
+        }
+
+        const double masterW = screen.x * 0.55;
+
+        tiling.front()->setPosition({0, 0});
+        tiling.front()->configure(Vector2D(masterW, work.y), {1});
+        tiling.front()->resizeTo(Vector2D(masterW, work.y));
+
+        const double stackW = screen.x - masterW;
+        const double stackH = work.y / (tiling.size() - 1);
+        for (size_t i = 1; i < tiling.size(); ++i) {
+            tiling[i]->setPosition(Vector2D(masterW, (double)(i - 1) * stackH));
+            tiling[i]->configure(Vector2D(stackW, stackH), {1});
+            tiling[i]->resizeTo(Vector2D(stackW, stackH));
+        }
+    }
+
+    void CCompositor::toggleTilingMode() {
+        // Master/stack is the only layout; retiles the workspace in place.
+        applyTiling();
+    }
+
+    void CCompositor::focusOnWorkspace(int workspace) {
+        for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
+            if ((*it)->visible() && (*it)->workspace() == workspace) {
+                focusWindow(it->get());
+                return;
+            }
+        }
+        focusWindow(nullptr);
+    }
+
+    int CCompositor::currentWorkspace() const {
+        return m_currentWorkspace;
+    }
+
+    bool CCompositor::workspaceHasTiling() const {
+        for (const auto& w : m_windows)
+            if (w->mapped() && !w->isFullscreen() && w->isTiling())
+                return true;
+        return false;
+    }
+
+    int CCompositor::firstEmptyWorkspace() const {
+        for (int ws = 1; ws <= MAX_WORKSPACE; ++ws) {
+            bool used = false;
+            for (const auto& w : m_windows) {
+                if (w->mapped() && w->workspace() == ws) {
+                    used = true;
+                    break;
+                }
+            }
+            if (!used)
+                return ws;
+        }
+        return m_currentWorkspace;
+    }
+
+    void CCompositor::refreshForeignToplevel() {
+        for (const auto& w : m_windows)
+            CForeignToplevelManager::get().onWindowState(w.get());
     }
 
 }

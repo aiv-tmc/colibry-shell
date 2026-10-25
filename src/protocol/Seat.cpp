@@ -1,25 +1,31 @@
-// Implementation of seat, keyboard and pointer handling.
+// Implementation of the compositor seat: wl_seat global, keyboard focus
+// and pointer focus, keybind dispatch.
 
 #include "Seat.hpp"
 
+#include "../core/Compositor.hpp"
 #include "../desktop/Cursor.hpp"
 #include "../desktop/DragManager.hpp"
 #include "../desktop/Keybinds.hpp"
+#include "../desktop/Launcher.hpp"
 #include "../desktop/Switcher.hpp"
+#include "../desktop/Window.hpp"
 #include "Display.hpp"
 #include "Surface.hpp"
 
-#include "../config/ConfigManager.hpp"
-#include "../core/Compositor.hpp"
-
-#include <sys/mman.h>
-#include <unistd.h>
-
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 
 #include <linux/input-event-codes.h>
-#include <wayland-server-protocol.h>
+#include <linux/vt.h>
+
+#include <xkbcommon/xkbcommon.h>
 
 namespace Colibry {
 
@@ -28,7 +34,7 @@ namespace Colibry {
 
         m_xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         if (!m_xkbContext) {
-            std::fprintf(stderr, "[colibry] failed to create xkb context\n");
+            std::fprintf(stderr, "[colibry] failed to create the xkb context\n");
             return false;
         }
 
@@ -38,6 +44,7 @@ namespace Colibry {
             return false;
         }
 
+        // The 2-argument variant returns a newly allocated string.
         const char* keymap = xkb_keymap_get_as_string(m_xkbKeymap, XKB_KEYMAP_FORMAT_TEXT_V1);
         if (!keymap) {
             std::fprintf(stderr, "[colibry] failed to serialize the xkb keymap\n");
@@ -48,10 +55,11 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &wl_seat_interface, 9, this, &CSeat::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create wl_seat global\n");
+            std::fprintf(stderr, "[colibry] failed to create the wl_seat global\n");
             return false;
         }
 
+        std::fprintf(stderr, "[colibry] seat ready\n");
         return true;
     }
 
@@ -60,7 +68,7 @@ namespace Colibry {
     }
 
     size_t CSeat::keymapSize() const {
-        return m_keymapString.size() + 1;
+        return m_keymapString.size();
     }
 
     bool CSeat::leftButtonDown() const {
@@ -74,6 +82,7 @@ namespace Colibry {
         entry.keyboard    = keyboard;
         entry.state       = xkb_state_new(m_xkbKeymap);
         entry.keyListener = keyboard->events.key.listen([this](const Aquamarine::IKeyboard::SKeyEvent& event) { onKey(event); });
+
         m_keyboards.push_back(std::move(entry));
     }
 
@@ -86,96 +95,16 @@ namespace Colibry {
         entry.warpListener   = pointer->events.warp.listen([this](const Aquamarine::IPointer::SWarpEvent& event) { onPointerWarp(event); });
         entry.buttonListener = pointer->events.button.listen([this](const Aquamarine::IPointer::SButtonEvent& event) { onPointerButton(event); });
         entry.axisListener   = pointer->events.axis.listen([this](const Aquamarine::IPointer::SAxisEvent& event) { onPointerAxis(event); });
+
         m_pointers.push_back(std::move(entry));
-    }
-
-    void CSeat::onKey(const Aquamarine::IKeyboard::SKeyEvent& event) {
-        for (auto& keyboard : m_keyboards) {
-            if (keyboard.state)
-                xkb_state_update_key(keyboard.state, event.key + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
-        }
-
-        switch (event.key) {
-            case KEY_LEFTCTRL:
-            case KEY_RIGHTCTRL: m_ctrlPressed = event.pressed; break;
-            case KEY_LEFTALT:
-            case KEY_RIGHTALT: m_altPressed = event.pressed; break;
-            case KEY_LEFTMETA:
-            case KEY_RIGHTMETA: m_superPressed = event.pressed; break;
-            case KEY_DELETE:
-                if (event.pressed && m_ctrlPressed && m_altPressed) {
-                    std::fprintf(stderr, "[colibry] Ctrl+Alt+Del pressed, exiting\n");
-                    CCompositor::requestExit();
-                }
-                return;
-            default: break;
-        }
-
-        // Ctrl+Alt+F1..F12 switches to another virtual terminal.
-        if (event.pressed && m_ctrlPressed && m_altPressed && event.key >= KEY_F1 && event.key <= KEY_F12) {
-            const auto& backend = CCompositor::get().m_backend;
-            if (backend && backend->session)
-                backend->session->switchVT(event.key - KEY_F1 + 1);
-            return;
-        }
-
-        // The switcher overlay consumes its own keys while open.
-        if (CSwitcher::get().active()) {
-            if (event.pressed && event.key == KEY_TAB && m_superPressed) {
-                CSwitcher::get().cycle(1);
-                return;
-            }
-            if (event.pressed && (event.key == KEY_ENTER || event.key == KEY_KPENTER)) {
-                CSwitcher::get().activate();
-                return;
-            }
-            if (event.pressed && event.key == KEY_ESC) {
-                CSwitcher::get().cancel();
-                return;
-            }
-            if (event.pressed)
-                CSwitcher::get().cancel();
-        }
-
-        uint32_t mods = 0;
-        if (m_superPressed)
-            mods |= BIND_SUPER;
-        if (m_ctrlPressed)
-            mods |= BIND_CTRL;
-        if (m_altPressed)
-            mods |= BIND_ALT;
-
-        xkb_state* state = m_keyboards.empty() ? nullptr : m_keyboards.front().state;
-        if (state && xkb_state_mod_name_is_active(state, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0)
-            mods |= BIND_SHIFT;
-
-        const xkb_keysym_t sym = state ? xkb_state_key_get_one_sym(state, event.key + 8) : XKB_KEY_NoSymbol;
-        const bool consumed    = CKeybindManager::get().handle(sym, mods, event.pressed);
-
-        if (consumed || !m_focusedSurface)
-            return;
-
-        for (const auto res : m_keyboardResources) {
-            if (wl_resource_get_client(res) != wl_resource_get_client(m_focusedSurface->resource()))
-                continue;
-
-            if (state) {
-                wl_keyboard_send_modifiers(res, event.timeMs, xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
-                                           xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
-                                           xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
-                                           xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE));
-            }
-
-            wl_keyboard_send_key(res, event.timeMs, event.timeMs, event.key,
-                                 event.pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
-        }
     }
 
     void CSeat::setKeyboardFocus(CSurface* surface) {
         if (m_focusedSurface == surface)
             return;
 
-        const auto serial = wl_display_next_serial(CCompositor::get().m_display->waylandDisplay());
+        const auto display = m_display->waylandDisplay();
+        const auto serial  = wl_display_next_serial(display);
 
         if (m_focusedSurface) {
             for (const auto res : m_keyboardResources) {
@@ -199,23 +128,114 @@ namespace Colibry {
         }
     }
 
+    void CSeat::onKey(const Aquamarine::IKeyboard::SKeyEvent& event) {
+        auto& compositor = CCompositor::get();
+
+        // Input stays locked during the startup fade and a short grace
+        // period after it.
+        if (compositor.inputLocked())
+            return;
+
+        // Track the modifier keys themselves for VT switching below.
+        if (event.key == KEY_LEFTCTRL || event.key == KEY_RIGHTCTRL)
+            m_ctrlPressed = event.pressed;
+        if (event.key == KEY_LEFTALT || event.key == KEY_RIGHTALT)
+            m_altPressed = event.pressed;
+        if (event.key == KEY_LEFTMETA || event.key == KEY_RIGHTMETA)
+            m_superPressed = event.pressed;
+
+        // Update every keyboard state with the event, then evaluate the
+        // key against the first keyboard's state.
+        for (auto& entry : m_keyboards)
+            xkb_state_update_key(entry.state, event.key + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+
+        auto* primary = m_keyboards.empty() ? nullptr : m_keyboards.front().state;
+        if (!primary)
+            return;
+
+        // The modifier mask is reduced to the four supported bits so
+        // unrelated locks (NumLock and friends) never break bind matching.
+        uint32_t mods = 0;
+        if (xkb_state_mod_name_is_active(primary, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_EFFECTIVE) > 0)
+            mods |= BIND_SUPER;
+        if (xkb_state_mod_name_is_active(primary, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0)
+            mods |= BIND_CTRL;
+        if (xkb_state_mod_name_is_active(primary, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0)
+            mods |= BIND_ALT;
+        if (xkb_state_mod_name_is_active(primary, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0)
+            mods |= BIND_SHIFT;
+
+        const xkb_keysym_t sym = xkb_state_key_get_one_sym(primary, event.key + 8);
+
+        // Ctrl+Alt+F1..F12 switches the virtual terminal.
+        if (m_ctrlPressed && m_altPressed && sym >= XKB_KEY_F1 && sym <= XKB_KEY_F12) {
+            if (event.pressed) {
+                const auto tty = open("/dev/tty0", O_RDWR);
+                if (tty >= 0) {
+                    ioctl(tty, VT_ACTIVATE, (int)(sym - XKB_KEY_F1 + 1));
+                    close(tty);
+                }
+            }
+            return;
+        }
+
+        // Overlays consume keys first: the launcher edits its filter, the
+        // switcher cycles and activates, and nothing reaches clients while
+        // an overlay is up.
+        if (CLauncher::get().active()) {
+            CLauncher::get().onKey(sym, mods, event.pressed);
+            return;
+        }
+
+        if (CSwitcher::get().active()) {
+            if (event.pressed) {
+                if (sym == XKB_KEY_Tab || sym == XKB_KEY_Right || sym == XKB_KEY_Down)
+                    CSwitcher::get().cycle(1);
+                else if (sym == XKB_KEY_Left || sym == XKB_KEY_Up)
+                    CSwitcher::get().cycle(-1);
+                else if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)
+                    CSwitcher::get().activate();
+                else if (sym == XKB_KEY_Escape)
+                    CSwitcher::get().cancel();
+            }
+            return;
+        }
+
+        const bool consumed = CKeybindManager::get().handle(sym, mods, event.pressed);
+        if (consumed)
+            return;
+
+        if (!m_focusedSurface)
+            return;
+
+        // Forward the raw event to the focused client's keyboards.
+        const auto serial = wl_display_next_serial(m_display->waylandDisplay());
+        const auto client = wl_resource_get_client(m_focusedSurface->resource());
+
+        for (const auto res : m_keyboardResources) {
+            if (wl_resource_get_client(res) == client)
+                wl_keyboard_send_key(res, serial, event.timeMs, event.key, event.pressed ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
+        }
+    }
+
     void CSeat::onPointerMove(const Aquamarine::IPointer::SMoveEvent& event) {
         auto& compositor = CCompositor::get();
 
-        // Damage the drawn cursor at its old position, advance the real
-        // position and the smoothed render position, then damage the new
-        // drawn position. Only those two small boxes redraw.
+        // Input stays locked during the startup fade and a short grace
+        // period after it.
+        if (compositor.inputLocked())
+            return;
+
         compositor.addDamage(compositor.m_cursor->damageBox());
-        compositor.m_cursor->moveBy(event.delta);
-        compositor.m_cursor->updateRenderPosition(event.timeMs);
+
+        // Feeding the motion into the drag manager also updates the
+        // hovered titlebar buttons and the client pointer focus.
         CDragManager::get().onMove(event.delta);
+
         compositor.addDamage(compositor.m_cursor->damageBox());
 
         const auto pos    = compositor.m_cursor->position();
         const auto serial = wl_display_next_serial(compositor.m_display->waylandDisplay());
-
-        if (CConfigManager::get().followMouse() && !CDragManager::get().active())
-            compositor.focusSurface(compositor.surfaceAt(pos));
 
         for (const auto res : m_pointerResources) {
             updatePointerFocus(res, pos, serial);
@@ -228,10 +248,14 @@ namespace Colibry {
     void CSeat::onPointerWarp(const Aquamarine::IPointer::SWarpEvent& event) {
         auto& compositor = CCompositor::get();
 
+        // Input stays locked during the startup fade and a short grace
+        // period after it.
+        if (compositor.inputLocked())
+            return;
+
         // Absolute positioning is a teleport: the drawn cursor snaps.
         compositor.addDamage(compositor.m_cursor->damageBox());
-        compositor.m_cursor->setBounds(event.absolute);
-        compositor.m_cursor->moveBy({0, 0});
+        compositor.m_cursor->setPosition(event.absolute);
         compositor.m_cursor->snapRender();
         compositor.addDamage(compositor.m_cursor->damageBox());
 
@@ -247,16 +271,22 @@ namespace Colibry {
     }
 
     void CSeat::onPointerButton(const Aquamarine::IPointer::SButtonEvent& event) {
-        const auto serial = wl_display_next_serial(CCompositor::get().m_display->waylandDisplay());
+        auto& compositor = CCompositor::get();
+
+        // Input stays locked during the startup fade and a short grace
+        // period after it.
+        if (compositor.inputLocked())
+            return;
+
+        const auto serial = wl_display_next_serial(compositor.m_display->waylandDisplay());
 
         if (event.button == BTN_LEFT) {
             m_leftDown = event.pressed;
 
-            if (event.pressed) {
+            if (event.pressed)
                 m_pressForwarded = !CDragManager::get().onPress(event.timeMs, m_superPressed);
-            } else {
+            else
                 CDragManager::get().onRelease();
-            }
         }
 
         if (!m_pressForwarded)
@@ -266,8 +296,7 @@ namespace Colibry {
             if (!m_pointerFocus.contains(res) || !m_pointerFocus[res])
                 continue;
 
-            wl_pointer_send_button(res, serial, event.timeMs, event.button,
-                                   event.pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
+            wl_pointer_send_button(res, serial, event.timeMs, event.button, event.pressed ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED);
         }
 
         if (!event.pressed)
@@ -275,6 +304,13 @@ namespace Colibry {
     }
 
     void CSeat::onPointerAxis(const Aquamarine::IPointer::SAxisEvent& event) {
+        auto& compositor = CCompositor::get();
+
+        // Input stays locked during the startup fade and a short grace
+        // period after it.
+        if (compositor.inputLocked())
+            return;
+
         const uint32_t axis = static_cast<uint32_t>(event.axis) == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? WL_POINTER_AXIS_HORIZONTAL_SCROLL :
                                                                                                        WL_POINTER_AXIS_VERTICAL_SCROLL;
 
@@ -341,7 +377,7 @@ namespace Colibry {
             .release = [](wl_client*, wl_resource* res) { wl_resource_destroy(res); },
         };
 
-        wl_resource_set_implementation(resource, &IMPLEMENTATION, wl_resource_get_user_data(seat), [](wl_resource* res) {
+        wl_resource_set_implementation(resource, &IMPLEMENTATION, self, [](wl_resource* res) {
             auto* self = static_cast<CSeat*>(wl_resource_get_user_data(res));
             std::erase(self->m_keyboardResources, res);
         });
@@ -379,8 +415,7 @@ namespace Colibry {
         static const struct wl_pointer_interface IMPLEMENTATION = {
             .set_cursor =
                 [](wl_client*, wl_resource*, uint32_t, wl_resource*, int32_t, int32_t) {
-                    // The compositor draws the system cursor itself; custom
-                    // cursor surfaces arrive with client-decorated apps.
+                    // The compositor draws the system cursor itself.
                 },
             .release = [](wl_client*, wl_resource* res) { wl_resource_destroy(res); },
         };
@@ -395,7 +430,7 @@ namespace Colibry {
     }
 
     void CSeat::getTouch(wl_client* client, wl_resource* seat, uint32_t /*id*/) {
-        wl_resource_post_error(seat, WL_SEAT_ERROR_MISSING_CAPABILITY, "touch capability is not available yet");
+        wl_resource_post_error(seat, WL_SEAT_ERROR_MISSING_CAPABILITY, "touch capability is not available");
     }
 
 }

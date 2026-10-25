@@ -1,17 +1,56 @@
-wallpaper = "@PREFIX@/share/colibry/wallpapers/default.jpg"
-wallpaper_fit = "cover"
-cursor_theme = "Adwaita"
-cursor_size = 24
-terminal = "foot"
-follow_mouse = 1
-shadow_enabled = 1
-shadow_offset_x = 0
-shadow_offset_y = 12
-shadow_radius = 24
-shadow_rounding = 8
-shadow_opacity = 0.45
-titlebar_height = 32
-titlebar_button_width = 46
-titlebar_font = "/path/to/font.ttf"
-monitors = ["eDP-1,1920x1200,1", ",preferred,1.5"]
-bind = ["SUPER+B=exec:firefox"]
+# Colibry system configuration.
+#
+# Scalar settings live in sections. The list settings (monitors, bind)
+# stay at the top level. @PREFIX@ expands to the installation prefix
+# during install. User overrides belong in
+# ~/.config/colibry/colibry.toml.
+
+# Wallpaper rendered by the compositor itself (no external daemons).
+[wallpaper]
+path = "@PREFIX@/share/colibry/wallpapers/default.png"
+fit = "cover"            # "cover" crops to fill, "fit" shows the whole image
+
+# Pointer look and feel.
+[cursor]
+theme = ""               # empty = XCURSOR_THEME or "default"
+size = 16                # cursor size in pixels
+speed = 0.3              # motion multiplier, 1.0 = raw device deltas
+
+# Focus and input behaviour.
+[input]
+follow_mouse = 1         # 1 = focus follows the pointer, 0 = click to focus
+
+# Programs used by default binds and the autostart terminal.
+[shell]
+terminal = ""            # empty = ghostty, then foot, kitty, alacritty, xterm
+
+# Constant soft shadow under every window.
+[shadow]
+enabled = 1
+offset_x = 0
+offset_y = 12
+radius = 24              # blur radius in pixels
+rounding = 8           # corner rounding of the shadow silhouette
+opacity = 0.45           # 0.0 .. 1.0
+
+# Server-side title bar drawn above every window.
+[titlebar]
+height = 32
+button_width = 46
+font = ""              # empty = first available system font
+
+# Window corners: content, title bar and shadow share this radius.
+[window]
+rounding = 10
+
+# Startup animation and input lock.
+[login]
+fade_ms = 750            # screen brightening length
+unlock_ms = 250         # extra input lock after the fade ends
+
+# Monitor rules: "name,resolution,scale"; an empty name matches every
+# output; resolution is "preferred" or "WxH".
+monitors = []
+
+# Extra key binds on top of the defaults: "MOD+KEY=action".
+bind = []

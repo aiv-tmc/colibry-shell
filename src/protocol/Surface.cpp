@@ -1,4 +1,4 @@
-// Implementation of wl_surface.
+// Implementation of wl_surface and subsurface state.
 
 #include "Surface.hpp"
 
@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <wayland-server-protocol.h>
+
+// Magic identifying dmabuf wl_buffer user data created through linux-dmabuf.
+#include "DMABuf.hpp"
 
 namespace Colibry {
 
@@ -27,26 +30,32 @@ namespace Colibry {
             .set_buffer_transform = setBufferTransform,
             .set_buffer_scale     = setBufferScale,
             .damage_buffer        = damageBuffer,
+            .offset               = offset,
         };
 
         auto* surface = new CSurface();
         surface->m_resource = resource;
         surface->m_display  = static_cast<CDisplay*>(wl_resource_get_user_data(compositor));
 
-        // Adopts the object and keeps it alive through the self reference
-        // until destroyResource drops it.
         surface->m_self = Hyprutils::Memory::CSharedPointer<CSurface>(surface);
 
         wl_resource_set_implementation(resource, &IMPLEMENTATION, surface,
                                        [](wl_resource* res) { static_cast<CSurface*>(wl_resource_get_user_data(res))->destroyResource(); });
 
-        // The display owns a second reference for the surface list.
         surface->m_display->registerSurface(surface->m_self);
     }
 
     void CSurface::destroyResource() {
         if (m_display)
             m_display->unregisterSurface(this);
+
+        if (m_parent) {
+            m_parent->removeSubsurface(this);
+            m_parent = nullptr;
+        }
+        for (const auto sub : m_subsurfaces)
+            wl_resource_destroy(sub->resource());
+        m_subsurfaces.clear();
 
         releaseBuffer();
 
@@ -60,8 +69,6 @@ namespace Colibry {
         wl_resource_set_user_data(m_resource, nullptr);
         wl_resource_destroy(m_resource);
 
-        // Drops the self reference; the object is freed once the display
-        // list released its reference above.
         m_self.reset();
     }
 
@@ -79,6 +86,53 @@ namespace Colibry {
 
     bool CSurface::mapped() const {
         return m_mapped;
+    }
+
+    const SSurfaceDMA& CSurface::currentDMA() const {
+        return m_currentDMA;
+    }
+
+    CSurface* CSurface::parent() const {
+        return m_parent;
+    }
+
+    void CSurface::attachSubsurface(CSurface* parent) {
+        m_parent = parent;
+    }
+
+    void CSurface::detachSubsurface() {
+        m_parent = nullptr;
+    }
+
+    const std::vector<CSurface*>& CSurface::subsurfaces() const {
+        return m_subsurfaces;
+    }
+
+    void CSurface::addSubsurface(CSurface* sub) {
+        m_subsurfaces.push_back(sub);
+    }
+
+    void CSurface::removeSubsurface(CSurface* sub) {
+        std::erase(m_subsurfaces, sub);
+    }
+
+    void CSurface::raiseSubsurface(CSurface* sub, CSurface* sibling, bool above) {
+        const auto subIt = std::find(m_subsurfaces.begin(), m_subsurfaces.end(), sub);
+        const auto sibIt = std::find(m_subsurfaces.begin(), m_subsurfaces.end(), sibling);
+        if (subIt == m_subsurfaces.end() || sibIt == m_subsurfaces.end())
+            return;
+
+        m_subsurfaces.erase(subIt);
+        const auto insertAt = std::find(m_subsurfaces.begin(), m_subsurfaces.end(), sibling);
+        m_subsurfaces.insert(above ? insertAt + 1 : insertAt, sub);
+    }
+
+    Hyprutils::Math::Vector2D CSurface::subsurfaceOffset() const {
+        return m_subsurfaceOffset;
+    }
+
+    void CSurface::setSubsurfaceOffset(int32_t x, int32_t y) {
+        m_subsurfaceOffset = {(double)x, (double)y};
     }
 
     void CSurface::sendFrameDone(uint32_t timeMs) {
@@ -107,14 +161,40 @@ namespace Colibry {
     void CSurface::attach(wl_client* /*client*/, wl_resource* resource, wl_resource* bufferResource, int32_t dx, int32_t dy) {
         auto* surface = static_cast<CSurface*>(wl_resource_get_user_data(resource));
 
-        CBuffer* buffer = nullptr;
-        if (bufferResource)
-            buffer = static_cast<CBuffer*>(wl_resource_get_user_data(bufferResource));
+        surface->m_pendingDMA = {};
+        surface->m_pendingBuffer.reset();
 
-        // Shares the buffer without owning the wayland resource.
-        surface->m_pendingBuffer = buffer ? buffer->self() : Hyprutils::Memory::CSharedPointer<CBuffer>(nullptr);
-        (void)dx;
-        (void)dy;
+        if (!bufferResource) {
+            surface->m_foreignBuffer = false;
+            (void)dx;
+            (void)dy;
+            return;
+        }
+
+        // Shared memory buffers carry a CBuffer.
+        if (wl_shm_buffer_get(bufferResource)) {
+            auto* buffer = static_cast<CBuffer*>(wl_resource_get_user_data(bufferResource));
+            surface->m_pendingBuffer = buffer ? buffer->self() : Hyprutils::Memory::CSharedPointer<CBuffer>(nullptr);
+            surface->m_foreignBuffer = false;
+            return;
+        }
+
+        // Dmabuf buffers created through linux-dmabuf carry attributes.
+        auto* attrs = static_cast<SDMABufAttrs*>(wl_resource_get_user_data(bufferResource));
+        if (attrs && attrs->valid) {
+            surface->m_pendingDMA.valid    = true;
+            surface->m_pendingDMA.fd       = attrs->fd;
+            surface->m_pendingDMA.width    = attrs->width;
+            surface->m_pendingDMA.height   = attrs->height;
+            surface->m_pendingDMA.format   = attrs->format;
+            surface->m_pendingDMA.modifier = attrs->modifier;
+            surface->m_pendingDMA.stride   = attrs->stride;
+            surface->m_pendingDMA.offset   = attrs->offset;
+            surface->m_foreignBuffer       = false;
+            return;
+        }
+
+        surface->m_foreignBuffer = true;
     }
 
     void CSurface::damage(wl_client* /*client*/, wl_resource* resource, int32_t x, int32_t y, int32_t w, int32_t h) {
@@ -133,22 +213,23 @@ namespace Colibry {
         surface->m_pendingFrameCallbacks.push_back(callback);
     }
 
-    void CSurface::setOpaqueRegion(wl_client* /*client*/, wl_resource* /*resource*/, wl_resource* /*region*/) {
-        // Opaque regions only matter for optimization; ignored at this stage.
+    void CSurface::setOpaqueRegion(wl_client*, wl_resource*, wl_resource*) {
+        // Opaque regions only matter for optimization; ignored.
     }
 
-    void CSurface::setInputRegion(wl_client* /*client*/, wl_resource* /*resource*/, wl_resource* /*region*/) {
-        // Input regions are consumed by the hit testing in the input stage.
+    void CSurface::setInputRegion(wl_client*, wl_resource*, wl_resource*) {
+        // Input regions are consumed by hit testing.
     }
 
-    void CSurface::commit(wl_client* /*client*/, wl_resource* resource) {
+    void CSurface::commit(wl_client*, wl_resource* resource) {
         auto* surface = static_cast<CSurface*>(wl_resource_get_user_data(resource));
 
-        // Swaps the pending state into the current state.
         surface->releaseBuffer();
         surface->m_currentBuffer  = surface->m_pendingBuffer;
         surface->m_pendingBuffer.reset();
-        surface->m_mapped         = surface->m_currentBuffer != nullptr;
+        surface->m_currentDMA     = surface->m_pendingDMA;
+        surface->m_pendingDMA     = {};
+        surface->m_mapped         = surface->m_currentBuffer != nullptr || surface->m_currentDMA.valid || surface->m_foreignBuffer;
         surface->m_damage         = surface->m_pendingDamage;
         surface->m_pendingDamage.clear();
         surface->m_frameCallbacks = std::move(surface->m_pendingFrameCallbacks);
@@ -160,18 +241,21 @@ namespace Colibry {
             surface->onCommit(surface);
     }
 
-    void CSurface::setBufferTransform(wl_client* /*client*/, wl_resource* /*resource*/, int32_t /*transform*/) {
-        // Buffer transforms are not supported at this stage.
+    void CSurface::setBufferTransform(wl_client*, wl_resource*, int32_t) {
+        // Buffer transforms are not supported.
     }
 
-    void CSurface::setBufferScale(wl_client* /*client*/, wl_resource* /*resource*/, int32_t /*scale*/) {
-        // HiDPI buffer scales are handled through output scaling instead.
+    void CSurface::setBufferScale(wl_client*, wl_resource*, int32_t) {
+        // HiDPI buffer scales are handled through output scaling.
     }
 
     void CSurface::damageBuffer(wl_client* client, wl_resource* resource, int32_t x, int32_t y, int32_t w, int32_t h) {
-        // The compositor renders buffers 1:1 in buffer-local coordinates, so
-        // damage_buffer and damage carry the same meaning here.
         damage(client, resource, x, y, w, h);
+    }
+
+    void CSurface::offset(wl_client*, wl_resource*, int32_t, int32_t) {
+        // wl_surface v6 default offset; surfaces are positioned by the
+        // compositor, so the request is accepted and ignored.
     }
 
 }

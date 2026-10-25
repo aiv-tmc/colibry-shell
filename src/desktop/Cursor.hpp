@@ -1,11 +1,12 @@
-// Cursor state and rendering for the Colibry compositor.
+// Pointer sprite, motion and visibility state for the Colibry compositor.
 //
-// CCursor loads the left_ptr image from the XCursor theme given at load()
-// (falling back to XCURSOR_THEME and "default") at the configured size and
-// tracks the pointer position. The drawn position is exponentially
-// smoothed toward the real position (time constant 30 ms) so batches of
-// input events render as continuous motion instead of steps; warps and the
-// first frame snap instantly.
+// The anchor follows the raw input clamped to the visible screen (hard
+// walls at the edges and along the rounded corner arcs); the rendered
+// position chases the anchor with exponential smoothing and a short
+// velocity extrapolation, so fast flicks land exactly under the hand
+// without any rubber-band feel. After a few seconds of stillness the
+// sprite shrinks and fades; movement brings it back with the same curve
+// in reverse.
 
 #pragma once
 
@@ -23,49 +24,77 @@ namespace Colibry {
         CCursor()          = default;
         ~CCursor()         = default;
 
-        // Loads the cursor image. An empty theme selects XCURSOR_THEME or
-        // "default"; a non-positive size selects XCURSOR_SIZE or 24.
+        // Loads the left_ptr sprite from the given XCursor theme.
         void load(const std::string& theme, int size);
+        void setSpeed(double speed);
 
-        // Real pointer position on screen (input target).
         Hyprutils::Math::Vector2D position() const;
-        // Drawn pointer position after smoothing; all rendering and damage
-        // use this.
         Hyprutils::Math::Vector2D renderPosition() const;
-        // The rectangle the drawn cursor covers plus a one-pixel margin;
-        // used for damage tracking.
-        Hyprutils::Math::CBox damageBox() const;
+        Hyprutils::Math::CBox     damageBox() const;
 
-        // Places the pointer at the given position, clamped to the bounds.
+        // Hotspot in sprite pixels, scaled by the visibility animation.
+        Hyprutils::Math::Vector2D hotspot() const;
+
+        // Current visibility animation alpha (1 = fully visible).
+        double visibilityAlpha() const;
+
+        // Walls: the anchor stays inside the screen rectangle and out of
+        // the rounded corners.
         void setPosition(Hyprutils::Math::Vector2D pos);
-        // Moves the pointer by a relative delta, clamped to the screen.
         void moveBy(Hyprutils::Math::Vector2D delta);
-        // Sets the clamping bounds from the output size.
         void setBounds(Hyprutils::Math::Vector2D bounds);
+        void setCornerRadius(double radius);
 
-        // Advances the drawn position toward the real position with
-        // exponential smoothing; time is the input event timestamp in
-        // milliseconds. Large jumps snap instantly.
-        void updateRenderPosition(uint32_t timeMs);
-        // Instantly aligns the drawn position with the real position
-        // (warps, first frame).
+        // Pins the rendered sprite to a fixed point while a window grab is
+        // holding it (the rubber band), releasing it back after.
+        void setRenderOverride(Hyprutils::Math::Vector2D pos);
+        void clearRenderOverride();
+
+        // Advances smoothing (with velocity extrapolation) and the
+        // visibility animation; returns true while anything is moving.
+        bool step(uint64_t nowMs);
+
+        void follow();
         void snapRender();
 
-        // Blends the cursor image into an XRGB8888 surface at the drawn
-        // position.
-        void draw(uint32_t* pixels, int32_t stridePixels, int32_t width, int32_t height) const;
+        // Rasterizes the sprite into a tightly cropped RGBA buffer with
+        // the scaled hotspot at the origin. Returns false when invisible.
+        bool rasterize(std::vector<uint32_t>& out, int32_t& w, int32_t& h) const;
 
       private:
-        std::vector<uint32_t>     m_pixels; // premultiplied ARGB
+        static constexpr double MOVE_EASE = 0.24;
+        static constexpr double REST_EASE = 0.18;
+
+        static constexpr uint64_t IDLE_HIDE_MS  = 3000;
+        static constexpr double   VIS_MIN_SCALE = 0.55;
+        static constexpr double   HIDE_EASE     = 0.14;
+        static constexpr double   SHOW_EASE     = 0.34;
+
+        // Hand-feel: fraction of a frame the smoothed position is
+        // extrapolated by, so flicks don't lag behind the wrist.
+        static constexpr double EXTRAPOLATE_FRACTION = 0.45;
+        static constexpr double EXTRAPOLATE_MAX_PX   = 3.0;
+
+        Hyprutils::Math::Vector2D clampAnchor(Hyprutils::Math::Vector2D pos) const;
+
+        std::vector<uint32_t>     m_pixels;
         Hyprutils::Math::Vector2D m_size;
         Hyprutils::Math::Vector2D m_hotspot;
-        Hyprutils::Math::Vector2D m_position;
         Hyprutils::Math::Vector2D m_bounds = {1920, 1080};
+        double                    m_cornerRadius = 0.0;
+        double                    m_speed        = 1.0;
 
-        // Smoothed render position state.
+        Hyprutils::Math::Vector2D m_position;
         Hyprutils::Math::Vector2D m_renderPosition;
-        uint32_t                  m_lastRenderUpdate = 0;
-        bool                      m_renderValid      = false;
+        Hyprutils::Math::Vector2D m_velocity;
+        uint64_t                  m_lastMoveMs  = 0;
+        bool                      m_renderValid = false;
+
+        bool                      m_override = false;
+        Hyprutils::Math::Vector2D m_overridePos;
+
+        double m_visScale = 1.0;
+        double m_visAlpha = 1.0;
     };
 
 }

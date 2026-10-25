@@ -1,11 +1,9 @@
-// Window switcher overlay for the Colibry compositor.
+// Window switcher model for the Colibry compositor.
 //
-// CSwitcher opens on SUPER+Tab and lists the windows of the current
-// workspace (minimized windows included, so the switcher can restore
-// them). SUPER+Tab cycles the selection, Enter activates the selected
-// window, Escape cancels; any other key cancels the overlay and is
-// processed normally. The overlay renders on top of the desktop: a dimmed
-// screen with a centered panel of window titles.
+// CSwitcher tracks the overlay state: the candidate windows of the current
+// workspace, the selection index and open/close transitions. It holds no
+// rendering code; the GPU pass in SwitcherDraw reads the model through
+// entries() and selected() and rasterizes the overlay.
 
 #pragma once
 
@@ -20,13 +18,11 @@ namespace Colibry {
       public:
         static CSwitcher& get();
 
-        // True while the overlay is visible.
         bool active() const;
 
-        // Opens the overlay with the windows of the current workspace,
-        // starting at the window after the focused one.
+        // Opens the overlay starting at the window after the focused one.
         void open();
-        // Moves the selection by the given direction (+1/-1).
+        // Moves the selection by the given direction (+1 or -1).
         void cycle(int direction);
         // Focuses and raises the selected window (restoring it when
         // minimized) and closes the overlay.
@@ -34,8 +30,9 @@ namespace Colibry {
         // Closes the overlay without changing focus.
         void cancel();
 
-        // Draws the overlay into an XRGB8888 surface.
-        void draw(uint32_t* pixels, int32_t stridePixels, int32_t screenWidth, int32_t screenHeight) const;
+        // Candidate windows, in stacking order.
+        const std::vector<CWindow*>& entries() const;
+        int                          selected() const;
 
       private:
         CSwitcher()  = default;
@@ -44,8 +41,6 @@ namespace Colibry {
         bool m_active = false;
         int  m_index  = 0;
 
-        // Snapshot of candidate windows taken at open(); entries may die
-        // while the overlay is up and are validated on every use.
         std::vector<CWindow*> m_entries;
     };
 

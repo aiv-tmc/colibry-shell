@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 #include <jpeglib.h>
@@ -13,10 +14,8 @@
 
 namespace Colibry {
 
-    // Opaque black used around a fit-scaled image.
     static constexpr uint32_t CLEAR_COLOR = 0xFF000000;
 
-    // Detects the image format from its magic bytes.
     static bool isPng(const std::string& path) {
         std::ifstream file(path, std::ios::binary);
         if (!file)
@@ -26,7 +25,6 @@ namespace Colibry {
         return file.gcount() == 4 && magic[0] == 0x89 && magic[1] == 'P' && magic[2] == 'N' && magic[3] == 'G';
     }
 
-    // Decodes a PNG through the libpng simplified API into an RGBA buffer.
     static bool decodePng(const std::string& path, std::vector<uint8_t>& out, Hyprutils::Math::Vector2D& size) {
         png_image image;
         std::memset(&image, 0, sizeof(image));
@@ -49,7 +47,6 @@ namespace Colibry {
         return true;
     }
 
-    // Decodes a JPEG through libjpeg-turbo into an RGBA buffer.
     static bool decodeJpeg(const std::string& path, std::vector<uint8_t>& out, Hyprutils::Math::Vector2D& size) {
         FILE* file = fopen(path.c_str(), "rb");
         if (!file)
@@ -96,22 +93,63 @@ namespace Colibry {
         return true;
     }
 
-    void CWallpaper::load(const std::string& path) {
+    // Builds the candidate paths for a configured wallpaper value: the raw
+    // path first, then @PREFIX@ expanded to the common install prefixes,
+    // then the file name alone inside the standard wallpaper directories.
+    // This keeps installations working no matter which prefix installed the
+    // assets and whether the config template was expanded.
+    static std::vector<std::string> wallpaperCandidates(const std::string& configured) {
+        std::vector<std::string> out;
+
+        if (configured.empty())
+            return out;
+
+        out.push_back(configured);
+
+        const auto prefixAt = configured.find("@PREFIX@");
+        if (prefixAt != std::string::npos) {
+            for (const char* prefix : {"/usr/local", "/usr", ""}) {
+                std::string variant = configured;
+                variant.replace(prefixAt, 8, prefix);
+                if (std::find(out.begin(), out.end(), variant) == out.end())
+                    out.push_back(variant);
+            }
+        }
+
+        const auto fileName = std::filesystem::path(configured).filename().string();
+        if (!fileName.empty() && fileName != configured) {
+            for (const char* dir : {"/usr/local/share/colibry/wallpapers/", "/usr/share/colibry/wallpapers/"}) {
+                std::string candidate = std::string(dir) + fileName;
+                if (std::find(out.begin(), out.end(), candidate) == out.end())
+                    out.push_back(candidate);
+            }
+        }
+
+        return out;
+    }
+
+    void CWallpaper::load(const std::string& configuredPath) {
         m_rgba.clear();
         m_size = {0, 0};
 
-        if (path.empty())
+        if (configuredPath.empty())
             return;
 
-        bool ok = isPng(path) ? decodePng(path, m_rgba, m_size) : decodeJpeg(path, m_rgba, m_size);
-        if (!ok) {
-            std::fprintf(stderr, "[colibry] failed to load wallpaper '%s'\n", path.c_str());
-            m_rgba.clear();
-            m_size = {0, 0};
-            return;
+        bool ok = false;
+        for (const auto& path : wallpaperCandidates(configuredPath)) {
+            if (!std::filesystem::exists(path))
+                continue;
+
+            ok = isPng(path) ? decodePng(path, m_rgba, m_size) : decodeJpeg(path, m_rgba, m_size);
+            if (ok) {
+                std::fprintf(stderr, "[colibry] wallpaper loaded: %s (%dx%d)\n", path.c_str(), (int)m_size.x, (int)m_size.y);
+                return;
+            }
         }
 
-        std::fprintf(stderr, "[colibry] wallpaper loaded: %dx%d\n", (int)m_size.x, (int)m_size.y);
+        std::fprintf(stderr, "[colibry] failed to load wallpaper '%s'\n", configuredPath.c_str());
+        m_rgba.clear();
+        m_size = {0, 0};
     }
 
     bool CWallpaper::hasImage() const {
@@ -133,8 +171,6 @@ namespace Colibry {
         m_fit = fit;
     }
 
-    // Samples the image with bilinear filtering at fractional coordinates;
-    // removes the blocky aliasing of downscaled wallpapers.
     static uint32_t sampleBilinear(const std::vector<uint8_t>& rgba, int imgW, int imgH, double fx, double fy) {
         fx = std::clamp(fx, 0.0, imgW - 1.001);
         fy = std::clamp(fy, 0.0, imgH - 1.001);
@@ -167,8 +203,6 @@ namespace Colibry {
         const int imgH = (int)m_size.y;
 
         if (m_fit == FIT_COVER) {
-            // Enlarge by the factor that makes the scaled image cover the
-            // whole output; the leftover is cropped symmetrically.
             const double s     = std::max((double)width / imgW, (double)height / imgH);
             const double cropW = width / s;
             const double cropH = height / s;
@@ -184,7 +218,6 @@ namespace Colibry {
             return;
         }
 
-        // Fit: the whole image is visible, centered on the clear color.
         const double s     = std::min((double)width / imgW, (double)height / imgH);
         const int    dispW = (int)(imgW * s);
         const int    dispH = (int)(imgH * s);

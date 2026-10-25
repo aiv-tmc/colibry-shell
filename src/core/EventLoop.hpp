@@ -1,9 +1,4 @@
 // Poll-based event loop with timers for the Colibry compositor.
-//
-// The loop owns watched file descriptors and recurring timers, dispatching
-// readiness notifications and timer callbacks. The compositor drives its
-// frame pacing through a 16 ms timer instead of relying on backend frame
-// events.
 
 #pragma once
 
@@ -13,18 +8,15 @@
 
 namespace Colibry {
 
-    // A single watched file descriptor entry.
     struct SLoopFD {
-        int fd;       // file descriptor watched with poll()
-        short events; // mask of POLLIN / POLLOUT interest flags
-        // Invoked when the descriptor reports any requested event.
+        int fd;
+        short events;
         std::function<void(short revents)> callback;
     };
 
-    // A recurring timer entry.
     struct SLoopTimer {
-        uint64_t              periodMs; // interval between firings
-        uint64_t              nextMs;   // next firing time, milliseconds
+        uint64_t              periodMs;
+        uint64_t              nextMs;
         std::function<void()> callback;
     };
 
@@ -36,21 +28,17 @@ namespace Colibry {
         CEventLoop(const CEventLoop&)            = delete;
         CEventLoop& operator=(const CEventLoop&) = delete;
 
-        // Registers a file descriptor for polling.
+        // Registers a file descriptor; an already-registered descriptor has
+        // its callback replaced, so backends can re-announce their fds
+        // (for example after a VT switch) without duplicates.
         void addFD(int fd, short events, std::function<void(short)> callback);
 
-        // Registers a recurring timer; the callback fires every periodMs
-        // milliseconds while the loop runs.
         void addTimer(uint64_t periodMs, std::function<void()> callback);
 
-        // Runs the loop until quit() is called.
-        int run();
-
-        // Requests the running loop to exit after the current cycle.
+        int  run();
         void quit();
 
       private:
-        // Fires every timer whose deadline passed and reschedules it.
         void dispatchTimers();
 
         std::vector<SLoopFD>    m_fds;

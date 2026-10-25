@@ -25,6 +25,8 @@ pkg_check_modules(WAYLAND_SERVER REQUIRED IMPORTED_TARGET wayland-server)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(LIBDRM REQUIRED IMPORTED_TARGET libdrm)
 pkg_check_modules(GBM REQUIRED IMPORTED_TARGET gbm)
+pkg_check_modules(GLESV2 REQUIRED IMPORTED_TARGET glesv2)
+pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
 pkg_check_modules(PIXMAN REQUIRED IMPORTED_TARGET pixman-1)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(LIBPNG REQUIRED IMPORTED_TARGET libpng)
@@ -42,6 +44,7 @@ pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 set(PROTOCOL_XMLS
   "${WAYLAND_SERVER_PKGDATADIR}/wayland.xml"
   "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml"
+  "${WAYLAND_PROTOCOLS_DIR}/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml"
   "${CMAKE_CURRENT_SOURCE_DIR}/protocols/wlr-foreign-toplevel-management-unstable-v1.xml"
 )
 
@@ -82,20 +85,27 @@ add_executable(
   src/protocol/Display.cpp
   src/protocol/Buffer.cpp
   src/protocol/Region.cpp
+  src/protocol/Subcompositor.cpp
   src/protocol/Surface.cpp
   src/protocol/Seat.cpp
   src/protocol/XdgShell.cpp
   src/protocol/DataDevice.cpp
+  src/protocol/DMABuf.cpp
   src/protocol/OutputInfo.cpp
   src/protocol/ForeignToplevel.cpp
   src/desktop/Window.cpp
+  src/desktop/Cloth.cpp
   src/desktop/Cursor.cpp
   src/desktop/Keybinds.cpp
   src/desktop/DragManager.cpp
-  src/desktop/TitleBar.cpp
-  src/desktop/Shadow.cpp
-  src/desktop/Layout.cpp
   src/desktop/Switcher.cpp
+  src/desktop/Launcher.cpp
+  src/render/GLEngine.cpp
+  src/render/GLCompositor.cpp
+  src/render/SceneDraw.cpp
+  src/render/SwitcherDraw.cpp
+  src/render/LauncherDraw.cpp
+  src/render/TitleText.cpp
   src/render/SolidRenderer.cpp
   src/wallpaper/WallpaperEngine.cpp
 )
@@ -112,6 +122,8 @@ target_link_libraries(
   PkgConfig::WAYLAND_CLIENT
   PkgConfig::LIBDRM
   PkgConfig::GBM
+  PkgConfig::GLESV2
+  PkgConfig::EGL
   PkgConfig::PIXMAN
   PkgConfig::XKBCOMMON
   PkgConfig::LIBPNG
@@ -124,9 +136,6 @@ add_executable(colibryctl src/ipc/ctl.cpp)
 
 install(TARGETS colibry colibryctl RUNTIME DESTINATION bin)
 
-# Installs the shipped wallpapers and the default configuration template
-# with the prefix placeholder resolved. Other files from assets/ (the
-# config) are handled by install(CODE) below.
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/"
         DESTINATION share/colibry/wallpapers
         FILES_MATCHING PATTERN "*.png" PATTERN "*.jpg" PATTERN "*.jpeg")
@@ -145,23 +154,4 @@ Comment=Colibry Wayland compositor
 Exec=\${CMAKE_INSTALL_PREFIX}/bin/colibry
 Type=Application
 \")
-")
-
-# Materializes /etc/colibry/colibry.toml from the shipped template when the
-# user has none; @PREFIX@ expands to the installation prefix.
-install(CODE "
-  set(TEMPLATE \"\${CMAKE_INSTALL_PREFIX}/share/colibry/colibry.toml\")
-  if(EXISTS /etc/colibry/colibry.toml)
-    message(STATUS \"keeping existing /etc/colibry/colibry.toml\")
-  elseif(EXISTS \"\${TEMPLATE}\")
-    file(READ \"\${TEMPLATE}\" COLIBRY_CONFIG)
-    string(REPLACE \"@PREFIX@\" \"\${CMAKE_INSTALL_PREFIX}\" COLIBRY_CONFIG \"\${COLIBRY_CONFIG}\")
-    file(MAKE_DIRECTORY /etc/colibry)
-    file(WRITE /etc/colibry/colibry.toml \"\${COLIBRY_CONFIG}\")
-    message(STATUS \"installed /etc/colibry/colibry.toml from the assets template\")
-  else()
-    file(MAKE_DIRECTORY /etc/colibry)
-    file(WRITE /etc/colibry/colibry.toml \"# Colibry system configuration\nwallpaper = \\\"\\\"\nwallpaper_fit = \\\"cover\\\"\ncursor_theme = \\\"\\\"\ncursor_size = 24\nterminal = \\\"\\\"\nfollow_mouse = 1\nshadow_enabled = 1\nshadow_offset_x = 0\nshadow_offset_y = 12\nshadow_radius = 24\nshadow_rounding = 8\nshadow_opacity = 0.45\ntitlebar_height = 32\ntitlebar_button_width = 46\ntitlebar_font = \\\"\\\"\nmonitors = []\nbind = []\n\")
-    message(STATUS \"installed a minimal /etc/colibry/colibry.toml\")
-  endif()
 ")

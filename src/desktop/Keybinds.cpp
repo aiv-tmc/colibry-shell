@@ -1,64 +1,231 @@
-// Implementation of keybind handling.
+// Implementation of the keybind dispatcher.
 
 #include "Keybinds.hpp"
 
 #include "../config/ConfigManager.hpp"
 #include "../core/Compositor.hpp"
-#include "Switcher.hpp"
-#include "Window.hpp"
+#include "../desktop/Launcher.hpp"
+#include "../desktop/Switcher.hpp"
+#include "../desktop/Window.hpp"
+#include "../protocol/Display.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <sstream>
 #include <string>
 #include <unistd.h>
 
+#include <xkbcommon/xkbcommon-keysyms.h>
+
 namespace Colibry {
 
-    // Shell fallback chains tried when the environment and the
-    // configuration do not name a program.
-    static const char* TERMINAL_FALLBACK = "foot || kitty || alacritty || xterm || weston-terminal";
-    static const char* LAUNCHER_FALLBACK = "fuzzel || wofi";
+    namespace {
 
-    static std::vector<std::string> split(const std::string& str, char delim) {
-        std::vector<std::string> out;
-        std::stringstream        stream(str);
-        std::string              item;
+        // Parses a modifier prefix ("SUPER+CTRL+") into the mask.
+        uint32_t parseMods(const std::string& keys) {
+            uint32_t mods = 0;
 
-        while (std::getline(stream, item, delim)) {
-            const auto begin = item.find_first_not_of(" \t");
-            const auto end   = item.find_last_not_of(" \t");
-            out.push_back(begin == std::string::npos ? "" : item.substr(begin, end - begin + 1));
+            std::string upper = keys;
+            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+
+            if (upper.contains("SUPER"))
+                mods |= BIND_SUPER;
+            if (upper.contains("CTRL") || upper.contains("CONTROL"))
+                mods |= BIND_CTRL;
+            if (upper.contains("ALT") || upper.contains("MOD1"))
+                mods |= BIND_ALT;
+            if (upper.contains("SHIFT"))
+                mods |= BIND_SHIFT;
+
+            return mods;
         }
 
-        return out;
-    }
+        // Resolves the terminal command: env override, config, fallback
+        // chain of common terminals.
+        std::string resolveTerminal() {
+            if (const char* env = std::getenv("COLIBRY_TERMINAL"))
+                if (*env)
+                    return env;
 
-    static std::string upper(std::string str) {
-        for (auto& c : str)
-            c = std::toupper(static_cast<unsigned char>(c));
-        return str;
-    }
+            const auto& configured = CConfigManager::get().terminal();
+            if (!configured.empty())
+                return configured;
 
-    // Resolves a pseudo-command to a concrete shell command.
-    static std::string resolveCommand(const char* envName, const std::string& configured, const char* fallback) {
-        const char* env = std::getenv(envName);
-        if (env && *env)
-            return env;
-        if (!configured.empty())
-            return configured;
-        return fallback;
-    }
+            return "ghostty || foot || kitty || alacritty || xterm || weston-terminal";
+        }
 
-    static void spawn(const char* command) {
-        const auto pid = fork();
-        if (pid == 0) {
+        // Spawns a shell command inside the compositor session.
+        void spawn(const std::string& command) {
+            auto& compositor = CCompositor::get();
+            if (!compositor.m_display)
+                return;
+
+            const auto pid = fork();
+            if (pid != 0)
+                return;
+
             setsid();
-            execlp("/bin/sh", "sh", "-c", command, static_cast<char*>(nullptr));
+            setenv("WAYLAND_DISPLAY", compositor.m_display->socketName().c_str(), 1);
+
+            execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+            std::fprintf(stderr, "[colibry] failed to spawn '%s'\n", command.c_str());
             _exit(1);
         }
+
+        // Rotates the current workspace until it equals the target.
+        void switchToWorkspace(int ws) {
+            auto& compositor = CCompositor::get();
+            while (compositor.m_currentWorkspace != ws) {
+                if (compositor.m_currentWorkspace < ws)
+                    compositor.m_currentWorkspace = compositor.m_currentWorkspace % 10 + 1;
+                else
+                    compositor.m_currentWorkspace = compositor.m_currentWorkspace - 1 < 1 ? 10 : compositor.m_currentWorkspace - 1;
+            }
+            compositor.applyTiling();
+            compositor.focusOnWorkspace(ws);
+            compositor.addFullDamage();
+        }
+
+        void moveActiveToWorkspace(int ws) {
+            auto& compositor = CCompositor::get();
+            if (compositor.m_focusedWindow)
+                compositor.moveWindowToWorkspace(compositor.m_focusedWindow, ws);
+        }
+
+        // Handles the non-exec bind verbs ("colibry:*", "workspace:*",
+        // "movetoworkspace:*").
+        void handleAction(const std::string& action) {
+            auto& compositor = CCompositor::get();
+
+            if (action.starts_with("exec:")) {
+                spawn(action.substr(5));
+                return;
+            }
+
+            if (action.starts_with("workspace:")) {
+                const int ws = std::atoi(action.substr(10).c_str());
+                if (ws >= 1)
+                    switchToWorkspace(ws);
+                return;
+            }
+
+            if (action.starts_with("movetoworkspace:")) {
+                const int ws = std::atoi(action.substr(16).c_str());
+                if (ws >= 1)
+                    moveActiveToWorkspace(ws);
+                return;
+            }
+
+            if (action == "colibry:exit") {
+                CCompositor::requestExit();
+                return;
+            }
+
+            if (action == "colibry:launcher") {
+                CLauncher::get().toggle();
+                return;
+            }
+
+            if (action == "colibry:openswitcher") {
+                CSwitcher::get().open();
+                return;
+            }
+
+            if (action == "colibry:closeswitcher" || action == "colibry:cancelswitcher") {
+                CSwitcher::get().cancel();
+                return;
+            }
+
+            if (action == "colibry:nextswitcher") {
+                CSwitcher::get().cycle(1);
+                return;
+            }
+
+            if (action == "colibry:prevswitcher") {
+                CSwitcher::get().cycle(-1);
+                return;
+            }
+
+            if (action == "colibry:activateswitcher") {
+                CSwitcher::get().activate();
+                return;
+            }
+
+            if (action == "colibry:focusnext") {
+                compositor.focusNext();
+                return;
+            }
+
+            if (action == "colibry:focusprev") {
+                compositor.focusPrev();
+                return;
+            }
+
+            if (action == "colibry:close") {
+                if (compositor.m_focusedWindow)
+                    compositor.m_focusedWindow->close();
+                return;
+            }
+
+            if (action == "colibry:fullscreen") {
+                if (compositor.m_focusedWindow)
+                    compositor.m_focusedWindow->toggleFullscreen();
+                return;
+            }
+
+            if (action == "colibry:minimize") {
+                if (compositor.m_focusedWindow)
+                    compositor.m_focusedWindow->setMinimized(true);
+                return;
+            }
+
+            if (action == "colibry:toggletiling") {
+                if (compositor.m_focusedWindow) {
+                    compositor.m_focusedWindow->toggleTiling();
+                    compositor.applyTiling();
+                }
+                return;
+            }
+        }
+
+        // Registers the built-in binds once before any config bind is
+        // added; config binds are appended after and may duplicate them.
+        void registerDefaults(CKeybindManager& manager) {
+            static const std::array<std::string, 15> DEFAULTS = {
+                "SUPER+Return=exec:" + resolveTerminal(),
+                "Alt+F1=exec:" + resolveTerminal(),
+                "SUPER+T=exec:ghostty",
+                "SUPER+E=exec:nautilus",
+                "SUPER+D=colibry:launcher",
+                "SUPER+Space=colibry:launcher",
+                "SUPER+Tab=colibry:openswitcher",
+                "SUPER+J=colibry:focusnext",
+                "SUPER+K=colibry:focusprev",
+                "SUPER+C=colibry:close",
+                "SUPER+Q=colibry:close",
+                "Alt+F4=colibry:close",
+                "SUPER+F=colibry:fullscreen",
+                "SUPER+M=colibry:minimize",
+                "SUPER+Shift+T=colibry:toggletiling",
+            };
+
+            for (const auto& def : DEFAULTS)
+                manager.addBind(def);
+
+            static const std::array<const char*, 10> DIGITS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"};
+            for (int i = 0; i < 10; ++i) {
+                manager.addBind("SUPER+" + std::string(DIGITS[i]) + "=workspace:" + std::to_string(i + 1));
+                manager.addBind("SUPER+Shift+" + std::string(DIGITS[i]) + "=movetoworkspace:" + std::to_string(i + 1));
+            }
+        }
+
+    }
+
+    // Defined out of line: the header only declares the constructor.
+    CKeybindManager::CKeybindManager() {
+        registerDefaults(*this);
     }
 
     CKeybindManager& CKeybindManager::get() {
@@ -66,190 +233,43 @@ namespace Colibry {
         return s_instance;
     }
 
-    CKeybindManager::CKeybindManager() {
-        // Default bind set covering the full input parity: launchers,
-        // closing, window state, focus cycling, tiling, workspaces.
-        static const std::vector<const char*> DEFAULTS = {
-            "SUPER+Return=exec:terminal",
-            "ALT+F1=exec:terminal",
-            "SUPER+D=exec:launcher",
-            "SUPER+C=colibry:close",
-            "SUPER+Q=colibry:close",
-            "ALT+F4=colibry:close",
-            "SUPER+F=colibry:fullscreen",
-            "SUPER+T=colibry:togglefloating",
-            "SUPER+M=colibry:minimize",
-            "SUPER+Tab=colibry:switcher",
-            "SUPER+J=colibry:focusnext",
-            "SUPER+K=colibry:focusprev",
-            "SUPER+Left=colibry:move -20 0",
-            "SUPER+Right=colibry:move 20 0",
-            "SUPER+Up=colibry:move 0 -20",
-            "SUPER+Down=colibry:move 0 20",
-            "SUPER+SHIFT+Left=colibry:resize -20 0",
-            "SUPER+SHIFT+Right=colibry:resize 20 0",
-            "SUPER+SHIFT+Up=colibry:resize 0 -20",
-            "SUPER+SHIFT+Down=colibry:resize 0 20",
-        };
+    void CKeybindManager::addBind(const std::string& bind) {
+        const auto sep = bind.find('=');
+        if (sep == std::string::npos || sep + 1 >= bind.size())
+            return;
 
-        for (const auto* def : DEFAULTS)
-            addBind(def);
+        const std::string keys   = bind.substr(0, sep);
+        const std::string action = bind.substr(sep + 1);
 
-        for (int digit = 1; digit <= 9; ++digit)
-            addBind("SUPER+" + std::to_string(digit) + "=colibry:workspace " + std::to_string(digit));
-        addBind("SUPER+0=colibry:workspace 10");
+        const auto plus = keys.rfind('+');
+        if (plus == std::string::npos)
+            return;
 
-        for (int digit = 1; digit <= 9; ++digit)
-            addBind("SUPER+SHIFT+" + std::to_string(digit) + "=colibry:movetoworkspace " + std::to_string(digit));
-        addBind("SUPER+SHIFT+0=colibry:movetoworkspace 10");
-    }
+        const uint32_t modMask = parseMods(plus > 0 ? keys.substr(0, plus) : "");
 
-    void CKeybindManager::addBind(const std::string& definition) {
-        const auto eq = definition.find('=');
-        if (eq == std::string::npos) {
-            std::fprintf(stderr, "[colibry] bind: missing '=': %s\n", definition.c_str());
+        const std::string keyName = keys.substr(plus + 1);
+        const xkb_keysym_t sym =
+            keyName.size() == 1 ? xkb_keysym_from_name(std::string(1, (char)std::toupper((unsigned char)keyName[0])).c_str(), XKB_KEYSYM_NO_FLAGS) :
+                                  xkb_keysym_from_name(keyName.c_str(), XKB_KEYSYM_CASE_INSENSITIVE);
+
+        if (sym == XKB_KEY_NoSymbol) {
+            std::fprintf(stderr, "[colibry] invalid bind key in '%s'\n", bind.c_str());
             return;
         }
 
-        const auto combo  = definition.substr(0, eq);
-        const auto action = definition.substr(eq + 1);
-        const auto parts  = split(combo, '+');
-
-        if (parts.size() < 2) {
-            std::fprintf(stderr, "[colibry] bind: need at least one modifier and a key: %s\n", definition.c_str());
-            return;
-        }
-
-        SBind bind;
-        bind.action = action;
-
-        for (size_t i = 0; i + 1 < parts.size(); ++i) {
-            const auto mod = upper(parts[i]);
-            if (mod == "SUPER")
-                bind.mods |= BIND_SUPER;
-            else if (mod == "CTRL")
-                bind.mods |= BIND_CTRL;
-            else if (mod == "ALT")
-                bind.mods |= BIND_ALT;
-            else if (mod == "SHIFT")
-                bind.mods |= BIND_SHIFT;
-            else {
-                std::fprintf(stderr, "[colibry] bind: unknown modifier '%s'\n", parts[i].c_str());
-                return;
-            }
-        }
-
-        bind.sym = xkb_keysym_from_name(parts.back().c_str(), XKB_KEYSYM_CASE_INSENSITIVE);
-        if (bind.sym == XKB_KEY_NoSymbol) {
-            std::fprintf(stderr, "[colibry] bind: unknown key '%s'\n", parts.back().c_str());
-            return;
-        }
-
-        for (auto it = m_binds.begin(); it != m_binds.end(); ++it) {
-            if (it->mods == bind.mods && it->sym == bind.sym) {
-                *it = bind;
-                return;
-            }
-        }
-        m_binds.push_back(bind);
+        m_binds.push_back({modMask, sym, action});
     }
 
     bool CKeybindManager::handle(xkb_keysym_t sym, uint32_t mods, bool pressed) {
-        m_mods = mods;
+        // Keybinds trigger on press only; releases fall through to clients.
         if (!pressed)
             return false;
 
         for (const auto& bind : m_binds) {
-            if (bind.sym != sym || bind.mods != mods)
-                continue;
-
-            const auto args = split(bind.action, ':');
-            const auto verb = args[0];
-
-            if (verb == "exec" && args.size() >= 2) {
-                const auto& config = CConfigManager::get();
-
-                if (args[1] == "terminal")
-                    spawn(resolveCommand("COLIBRY_TERMINAL", config.terminal(), TERMINAL_FALLBACK).c_str());
-                else if (args[1] == "launcher")
-                    spawn(resolveCommand("COLIBRY_LAUNCHER", "", LAUNCHER_FALLBACK).c_str());
-                else
-                    spawn(args[1].c_str());
+            if (bind.mods == mods && bind.sym == sym) {
+                handleAction(bind.action);
                 return true;
             }
-
-            if (verb == "colibry") {
-                auto&      compositor = CCompositor::get();
-                const auto sub        = split(args.size() >= 2 ? args[1] : "", ' ');
-
-                if (sub.empty())
-                    return true;
-
-                if (sub[0] == "close") {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->close();
-                    return true;
-                }
-                if (sub[0] == "exit") {
-                    CCompositor::requestExit();
-                    return true;
-                }
-                if (sub[0] == "fullscreen") {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->toggleFullscreen();
-                    return true;
-                }
-                if (sub[0] == "togglefloating") {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->toggleTiling();
-                    return true;
-                }
-                if (sub[0] == "maximize") {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->toggleMaximized();
-                    return true;
-                }
-                if (sub[0] == "minimize") {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->setMinimized(true);
-                    return true;
-                }
-                if (sub[0] == "focusnext") {
-                    compositor.focusNext();
-                    return true;
-                }
-                if (sub[0] == "focusprev") {
-                    compositor.focusPrev();
-                    return true;
-                }
-                if (sub[0] == "switcher") {
-                    CSwitcher::get().open();
-                    return true;
-                }
-                if (sub[0] == "workspace" && sub.size() >= 2) {
-                    compositor.switchWorkspace(std::atoi(sub[1].c_str()));
-                    return true;
-                }
-                if (sub[0] == "movetoworkspace" && sub.size() >= 2) {
-                    compositor.moveWindowToWorkspace(compositor.m_focusedWindow, std::atoi(sub[1].c_str()));
-                    return true;
-                }
-                if (sub[0] == "move" && sub.size() >= 3) {
-                    if (compositor.m_focusedWindow)
-                        compositor.m_focusedWindow->moveBy({std::atof(sub[1].c_str()), std::atof(sub[2].c_str())});
-                    return true;
-                }
-                if (sub[0] == "resize" && sub.size() >= 3) {
-                    if (compositor.m_focusedWindow) {
-                        const auto current = compositor.m_focusedWindow->size();
-                        compositor.m_focusedWindow->resizeTo({current.x + std::atof(sub[1].c_str()), current.y + std::atof(sub[2].c_str())});
-                    }
-                    return true;
-                }
-            }
-
-            std::fprintf(stderr, "[colibry] bind: unknown action '%s'\n", bind.action.c_str());
-            return true;
         }
 
         return false;

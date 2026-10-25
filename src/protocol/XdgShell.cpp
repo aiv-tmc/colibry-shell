@@ -15,8 +15,6 @@
 
 namespace Colibry {
 
-    // Protocol state of one xdg_surface. Owned by the xdg_surface resource;
-    // destroyed together with it.
     struct SXdgSurface {
         CSurface*    surface          = nullptr;
         wl_resource* resource         = nullptr;
@@ -28,8 +26,6 @@ namespace Colibry {
         bool     initialConfigureSent = false;
     };
 
-    // Placement state accumulated by an xdg_positioner; consumed when popup
-    // surfaces are mapped in the popup stage.
     struct SPositioner {
         Hyprutils::Math::Vector2D size;
         Hyprutils::Math::CBox     anchorRect;
@@ -52,6 +48,8 @@ namespace Colibry {
     }
 
     void CXdgShell::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
+        std::fprintf(stderr, "[colibry] client bound xdg_wm_base\n");
+
         const auto resource = wl_resource_create(client, &xdg_wm_base_interface, version, id);
         if (!resource) {
             wl_client_post_no_memory(client);
@@ -73,7 +71,7 @@ namespace Colibry {
     }
 
     void CXdgShell::pong(wl_client* /*client*/, wl_resource* /*resource*/, uint32_t /*serial*/) {
-        // Ping/pong keepalive; nothing to verify at this stage.
+        // Ping/pong keepalive; nothing to verify.
     }
 
     void CXdgShell::createPositioner(wl_client* client, wl_resource* /*resource*/, uint32_t id) {
@@ -176,7 +174,6 @@ namespace Colibry {
         data->configureSerial      = wl_display_next_serial(wl_client_get_display(wl_resource_get_client(xdgSurfaceResource)));
 
         if (data->toplevelResource) {
-            // Zero size lets the client pick its own dimensions.
             struct wl_array states;
             wl_array_init(&states);
             xdg_toplevel_send_configure(data->toplevelResource, 0, 0, &states);
@@ -223,8 +220,6 @@ namespace Colibry {
     }
 
     void CXdgShell::getPopup(wl_client* client, wl_resource* resource, uint32_t id, wl_resource* /*parent*/, wl_resource* positioner) {
-        // Popup surfaces are created with their placement state stored; the
-        // popup stage maps and positions them.
         const auto popup = wl_resource_create(client, &xdg_popup_interface, 6, id);
         if (!popup) {
             wl_client_post_no_memory(client);
@@ -245,8 +240,6 @@ namespace Colibry {
     }
 
     void CXdgShell::setWindowGeometry(wl_client* /*client*/, wl_resource* /*resource*/, int32_t x, int32_t y, int32_t w, int32_t h) {
-        // Window geometry is consumed by hit testing and decorations; the
-        // committed buffer bounds already drive rendering.
         (void)x;
         (void)y;
         (void)w;
@@ -315,10 +308,17 @@ namespace Colibry {
         if (!data || !data->window)
             return;
 
-        // A window opening fullscreen goes to a fresh empty workspace.
         auto& compositor = CCompositor::get();
-        if (!data->window->mapped())
+
+        if (!data->window->mapped()) {
+            // A window that asks for fullscreen before its first commit goes
+            // to a fresh empty workspace and opens tiled across it, not in
+            // protocol fullscreen.
             compositor.moveWindowToWorkspace(data->window.get(), compositor.firstEmptyWorkspace());
+            data->window->openTiledFullscreen();
+            return;
+        }
+
         data->window->setFullscreen(true);
     }
 

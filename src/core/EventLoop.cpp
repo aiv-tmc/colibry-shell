@@ -10,12 +10,18 @@
 
 namespace Colibry {
 
-    // Returns the monotonic clock in milliseconds.
     static uint64_t nowMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
     void CEventLoop::addFD(int fd, short events, std::function<void(short)> callback) {
+        for (auto& entry : m_fds) {
+            if (entry.fd == fd) {
+                entry.events  = events;
+                entry.callback = std::move(callback);
+                return;
+            }
+        }
         m_fds.push_back(SLoopFD{.fd = fd, .events = events, .callback = std::move(callback)});
     }
 
@@ -31,8 +37,6 @@ namespace Colibry {
                 continue;
 
             timer.callback();
-            // Reschedules from the deadline, not from now, so a delayed
-            // firing does not drift the cadence.
             timer.nextMs += timer.periodMs;
             if (timer.nextMs <= now)
                 timer.nextMs = now + timer.periodMs;
@@ -51,9 +55,6 @@ namespace Colibry {
                 pollfds[i].revents = 0;
             }
 
-            // The poll timeout is the time until the nearest timer; with no
-            // timers armed the loop sleeps up to a second so quit() stays
-            // responsive.
             int timeoutMs = 1000;
             if (!m_timers.empty()) {
                 uint64_t nearest = UINT64_MAX;
