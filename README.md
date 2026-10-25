@@ -1,139 +1,138 @@
-# Skein Shell
+# Colibry
 
-Графическая оболочка оконного уровня для Skein OS. Wayland-композитор,
-написанный с нуля на C++ поверх библиотеки Aquamarine (DRM/KMS, libinput,
-сессии). Не использует код Hyprland, wlroots, KDE и GNOME: только
-Aquamarine, hyprutils и собственный протокольный слой.
+A from-scratch Wayland compositor written in C++23 on top of the Aquamarine backend library (KMS/DRM, libinput, session management). No code from Hyprland, wlroots, KDE, or GNOME — only Aquamarine, Hyprutils, and a hand-written protocol layer.
 
-Оболочка делает всё сама, без внешних демонов: обои, тени, заголовки окон,
-переключатель окон, буфер обмена — внутри одного процесса.
+The shell does everything in one process: GPU compositing, server-side window decorations, elastic window physics, wallpaper, clipboard, window switcher, and an application launcher.
 
-## Состояние (v0.1)
+## Highlights
 
-Работает:
+- **GPU-only compositing (GLES2/EGL).** Damage-driven frames: a still desktop produces zero GPU and zero CPU work. One fullscreen window without overlays takes the direct fast path — a single textured quad per damaged rectangle.
+- **Elastic cloth windows.** Every window box is a verlet-simulated mesh. Dragging stretches the surface from the grab point while the rest follows; tiling, snapping, maximizing, and workspace changes make the material visibly settle. Opens grow in with an overshoot, closes shrink out with a fade.
+- **Buttery pointer.** Exponentially smoothed motion with velocity extrapolation, hard walls at screen edges and rounded corners, idle shrink-and-fade with a symmetric reappear animation.
+- **Adaptive titlebars.** A gradient derived from the window's own top pixels (via a GLES shader), FreeType titles, background-less min/max/close glyphs with hover state, drag anywhere, double-click maximize.
+- **GPU shadows.** Blurred silhouettes generated on the GPU, cached per size, offset/opacity configurable.
+- **macOS-style launcher.** SUPER+D / SUPER+Space: fuzzy search over desktop entries, grid of translucent tiles.
+- **Cinematic switcher.** SUPER+Tab: the desktop blurs, the unselected area dims in a gradient around the selected card, cards show live window content with white borders.
+- **Rounded everything, for real.** Signed-distance corner shaders for windows and the screen itself; screen corners are pure black and untouchable — the cursor slides along the arcs.
 
-- Встроенные обои (PNG/JPEG, cover/fit, билинейная фильтрация),
-  смена через `colibryctl wallpaper` или конфиг.
-- Плавающие окна по умолчанию; тайлинг master/stack включается явно.
-- Рабочие столы 1-10, правила: fullscreen подразумевает тайлинг,
-  fullscreen-при-открытии уходит на пустой стол, новые окна на тайловом
-  столе открываются тайловыми.
-- Серверные заголовки окон в стиле Windows: иконка, текст (FreeType),
-  кнопки min/max/close с hover/press, drag за заголовок, двойной клик —
-  максимизация. Drag за полностью прозрачные пиксели контента.
-- Тень под окнами: размытие силуэта со скруглением, кэшируется по размеру.
-- Курсор из темы XCursor, с экспоненциальным сглаживанием движения.
-- Damage-driven рендеринг: перерисовывается только изменённое;
-  кадр 60 Гц при коммитах каждые 17 мс.
-- Буфер обмена (копипаст между клиентами).
-- foreign-toplevel (панели видят окна) и wl_output.
-- Полное управление с клавиатуры и с мыши (`docs/input-parity.md`).
-- IPC: `colibryctl version | exit | wallpaper &lt;path&gt;`.
+## Status
 
-Ограничения:
+Working:
 
-- Композитинг на CPU. Для полупрозрачных тяжёлых приложений следующий
-  этап — GPU-рендер (EGL).
-- Нет layer-shell (панели waybar не закрепить по краю), dmabuf
-  (клиенты на shm), XWayland, dnd, жестов тачпада, рендера попапов.
-- Один монитор; мультимонитор — косметическая поддержка.
+- Floating windows by default; explicit master/stack tiling; workspaces 1–10 with move/send keybinds.
+- Fullscreen-at-open windows (games, viewers) land on a fresh empty workspace.
+- Server-side decorations with hover/press buttons and transparent-pixel content drags.
+- Edge and corner resizing; snap zones (half/quarter/fullscreen) with elastic settle.
+- Clipboard between clients; `foreign-toplevel` and `wl_output` for panels.
+- Keyboard and mouse parity (`docs/input-parity.md` if present).
+- IPC: `colibryctl version | exit | wallpaper <path>`.
 
-## Зависимости
+Limitations:
 
-Arch: `aquamarine hyprutils wayland wayland-protocols libdrm mesa pixman
-xkbcommon libpng libjpeg-turbo libxcursor freetype2`
+- Nested (Wayland/X11 backend) sessions are not supported — GPU rendering requires the DRM node.
+- Single-plane dmabuf import only (plane 0, ARGB8888/XRGB8888); clients on shm work everywhere.
+- No layer-shell, XWayland, drag-and-drop, touchpad gestures, or popup rendering yet.
+- Single output is the tested configuration; multi-output is cosmetic.
 
-Терминал для автостарта: `foot` или `ghostty` (иначе задайте `terminal=`
-или `COLIBRY_TERMINAL`).
+## Dependencies
 
-## Сборка
+Arch: `aquamarine hyprutils wayland wayland-protocols libdrm mesa pixman xkbcommon libpng libjpeg-turbo libxcursor freetype2`
 
-    ./build.sh --clean          # debug
-    ./build.sh --clean --asan   # с санитайзерами
+A terminal for autostart: `foot` or `ghostty` (or set `terminal=` / `COLIBRY_TERMINAL`).
 
-## Установка
+## Build & install
 
-    sudo ./install.sh                    # /usr/local, конфиг из assets/
-    sudo ./install.sh --prefix /usr
+```sh
+./build.sh --clean          # debug build into ./build
+./build.sh --clean --asan   # with sanitizers
 
-NixOS: `services.colibry.enable = true;` (модуль в `nixos/module.nix`).
+sudo ./install.sh                  # /usr/local, config from assets/
+sudo ./install.sh --prefix /usr
+```
 
-## Запуск
+NixOS: `services.colibry.enable = true;` (module in `nixos/module.nix`).
 
-Из TTY, одной командой — терминал откроется сам:
+## Run
 
-    colibry
+From a TTY — the autostart terminal opens by itself:
 
-Выход: Ctrl+Alt+Del или `colibryctl exit`. Переключение TTY:
-Ctrl+Alt+F1..F12. Если запуск не показал кадр, процесс завершится сам
-(watchdog 30 с), консоль вернёт seatd.
+```sh
+colibry
+```
 
-## Конфигурация
+Exit: Ctrl+Alt+Del or `colibryctl exit`. Switch VTs: Ctrl+Alt+F1..F12. If no frame reaches the screen within 20 s, a watchdog terminates the process and returns the console.
 
-`/etc/colibry/colibry.toml`, поверх читается
-`~/.config/colibry/colibry.toml`:
+## Configuration
 
-    wallpaper = "@PREFIX@/share/colibry/wallpapers/default.png"
-    wallpaper_fit = "cover"        # или "fit"
-    cursor_theme = "Adwaita"
-    cursor_size = 24
-    terminal = "ghostty"
-    follow_mouse = 1
-    shadow_enabled = 1
-    shadow_offset_x = 0
-    shadow_offset_y = 12
-    shadow_radius = 24
-    shadow_rounding = 8
-    shadow_opacity = 0.45
-    titlebar_height = 32
-    titlebar_button_width = 46
-    titlebar_font = "/path/to/font.ttf"
-    monitors = ["eDP-1,1920x1200,1", ",preferred,1.5"]
-    bind = ["SUPER+B=exec:firefox"]
+`/etc/colibry/colibry.toml`, merged with `~/.config/colibry/colibry.toml`:
 
-## Клавиши (по умолчанию)
+```toml
+wallpaper = "/usr/share/colibry/wallpapers/default.jpg"
+wallpaper_fit = "cover"          # or "fit"
+cursor_theme = "Adwaita"
+cursor_size = 24
+terminal = "ghostty"
+monitors = ["eDP-1,1920x1200,1", ",preferred,1.5"]
+bind = ["SUPER+B=exec:firefox"]
 
-    SUPER+Return, Alt+F1   терминал
-    SUPER+T                ghostty
-    SUPER+E                nautilus
-    SUPER+D                launcher (fuzzel || wofi)
-    SUPER+Tab              переключатель окон (Enter/Esc)
-    SUPER+J / SUPER+K      фокус следующее/предыдущее окно
-    SUPER+C, SUPER+Q, Alt+F4  закрыть
-    SUPER+F                fullscreen        SUPER+M  свернуть
-    SUPER+Shift+T          float/tiling    SUPER+Shift+ стрелки — ресайз
-    SUPER+стрелки          перемещение
-    SUPER+1..0 / SUPER+Shift+1..0   столы / отправить окно
-    SUPER+drag             двигать окно за любую точку
-    Ctrl+Alt+Del           выход
+window_rounding = 10
+screen_rounding = 0
+open_anim_ms = 220
+shadow_enabled = 1
+shadow_offset_y = 12
+shadow_opacity = 0.45
+titlebar_height = 32
+```
 
-Мышь: drag за заголовок, за края/углы — ресайз, кнопки в заголовке,
-focus-follows-mouse (отключается `follow_mouse = 0`).
+Cloth feel is tuned in source: `CLOTH_DAMPING` / `CLOTH_PULL` in `src/desktop/Cloth.cpp`, cursor extrapolation in `src/desktop/Cursor.hpp`.
 
-## Тестирование
+## Default keybinds
 
-    tests/e2e/smoke.sh ./build/colibry   # из TTY или nested
-    ./build/colibry & sleep 2
-    python3 tests/fuzz_ipc.py $(pgrep -n colibry)
-    ./build/colibryctl exit
+```
+SUPER+Return, Alt+F1   terminal
+SUPER+D, SUPER+Space   launcher
+SUPER+Tab              window switcher (arrows/Tab cycle, Enter, Esc)
+SUPER+J / SUPER+K      focus next / previous window
+SUPER+C, SUPER+Q, Alt+F4   close (animated)
+SUPER+F                fullscreen          SUPER+M  minimize
+SUPER+Shift+T          float / tiling
+SUPER+arrows-drag      move window (elastic cloth grab)
+SUPER+1..0 / SUPER+Shift+1..0   workspaces / send window
+Ctrl+Alt+Del           exit
+```
 
-## Репозиторий
+Mouse: drag by the titlebar, resize at edges and corners, buttons in the titlebar, focus follows the pointer.
 
-    src/core/       координатор, цикл событий, выход (сцена + damage)
-    src/protocol/   Wayland: display, shm, surface, xdg-shell, seat,
-                    clipboard, wl_output, foreign-toplevel
-    src/desktop/    окна, раскладка, заголовки, тень, курсор, бинды,
-                    switcher, drag
-    src/wallpaper/  загрузка и отрисовка обоев
-    src/render/     линейные буферы (GBM)
-    src/config/     TOML-конфиг
-    src/ipc/        сокет и colibryctl
-    tests/          smoke и fuzz
-    protocols/      вендоренные XML
-    assets/         обои и шаблон colibry.toml
-    nixos/          пакет и модуль
+## Testing
 
-Дорожная карта после v0.1: GPU-композитинг, layer-shell, dmabuf,
-XWayland, dnd, жесты, мультимонитор, попапы.
+```sh
+tests/e2e/smoke.sh ./build/colibry      # from TTY
+python3 tests/fuzz_ipc.py $(pgrep -n colibry)
+./build/colibryctl exit
+```
 
-Лицензия: BSD-3-Clause.
+## Repository
+
+```
+src/core/       compositor coordinator, event loop, output presentation
+src/protocol/   Wayland: display, shm, surface, xdg-shell, seat,
+                clipboard, wl_output, linux-dmabuf, foreign-toplevel
+src/desktop/    windows, cloth physics, chrome geometry, drag gestures,
+                cursor, keybinds, switcher, launcher
+src/render/     EGL/GLES engine, shaders, scene passes, text rasterization
+src/wallpaper/  wallpaper scaling
+src/config/     TOML configuration
+src/ipc/        control socket and colibryctl
+tests/          smoke and fuzz tests
+protocols/      vendored protocol XML
+assets/         wallpapers and config template
+nixos/          package and module
+```
+
+Architecture and developer guide: see the project wiki (`Architecture` page).
+
+## Roadmap
+
+Layer-shell, full dmabuf multi-plane, XWayland, drag-and-drop, touchpad gestures, multi-output workspaces, popup rendering.
+
+License: MPL v2.0.
