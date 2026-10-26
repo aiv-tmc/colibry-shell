@@ -19,7 +19,7 @@
 
 #include <xkbcommon/xkbcommon-keysyms.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     namespace {
 
@@ -45,7 +45,7 @@ namespace Colibry {
         // Resolves the terminal command: env override, config, fallback
         // chain of common terminals.
         std::string resolveTerminal() {
-            if (const char* env = std::getenv("COLIBRY_TERMINAL"))
+            if (const char* env = std::getenv("COLIBRYSHELL_TERMINAL"))
                 if (*env)
                     return env;
 
@@ -70,7 +70,7 @@ namespace Colibry {
             setenv("WAYLAND_DISPLAY", compositor.m_display->socketName().c_str(), 1);
 
             execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
-            std::fprintf(stderr, "[colibry] failed to spawn '%s'\n", command.c_str());
+            std::fprintf(stderr, "[colibry-shell] failed to spawn '%s'\n", command.c_str());
             _exit(1);
         }
 
@@ -193,7 +193,7 @@ namespace Colibry {
         // Registers the built-in binds once before any config bind is
         // added; config binds are appended after and may duplicate them.
         void registerDefaults(CKeybindManager& manager) {
-            static const std::array<std::string, 15> DEFAULTS = {
+            static const std::array<std::string, 16> DEFAULTS = {
                 "SUPER+Return=exec:" + resolveTerminal(),
                 "Alt+F1=exec:" + resolveTerminal(),
                 "SUPER+T=exec:ghostty",
@@ -209,6 +209,7 @@ namespace Colibry {
                 "SUPER+F=colibry:fullscreen",
                 "SUPER+M=colibry:minimize",
                 "SUPER+Shift+T=colibry:toggletiling",
+                "Ctrl+Alt+Delete=colibry:exit",
             };
 
             for (const auto& def : DEFAULTS)
@@ -253,7 +254,7 @@ namespace Colibry {
                                   xkb_keysym_from_name(keyName.c_str(), XKB_KEYSYM_CASE_INSENSITIVE);
 
         if (sym == XKB_KEY_NoSymbol) {
-            std::fprintf(stderr, "[colibry] invalid bind key in '%s'\n", bind.c_str());
+            std::fprintf(stderr, "[colibry-shell] invalid bind key in '%s'\n", bind.c_str());
             return;
         }
 
