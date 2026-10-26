@@ -19,7 +19,7 @@ static constexpr unsigned int STARTUP_WATCHDOG_SECONDS = 30;
 // Watchdog handler: async-signal-safe exit so the seat daemon restores the
 // console even when the main loop never started.
 static void watchdogHandler(int /*sig*/) {
-    static const char MSG[] = "[colibry] startup watchdog fired, exiting\n";
+    static const char MSG[] = "[colibry-shell] startup watchdog fired, exiting\n";
     write(STDERR_FILENO, MSG, sizeof(MSG) - 1);
     _exit(1);
 }
@@ -27,7 +27,7 @@ static void watchdogHandler(int /*sig*/) {
 // Crash handler: dying is safe here because the seat daemon restores the
 // console when the client connection drops.
 static void crashHandler(int sig) {
-    const char* msg = sig == SIGSEGV ? "[colibry] segfault, exiting\n" : "[colibry] fatal signal, exiting\n";
+    const char* msg = sig == SIGSEGV ? "[colibry-shell] segfault, exiting\n" : "[colibry-shell] fatal signal, exiting\n";
     write(STDERR_FILENO, msg, 30);
     _exit(1);
 }
@@ -51,7 +51,7 @@ int main() {
     std::signal(SIGABRT, crashHandler);
     std::signal(SIGBUS, crashHandler);
 
-    auto& compositor = Colibry::CCompositor::get();
+    auto& compositor = ColibryShell::CCompositor::get();
 
     if (!compositor.init()) {
         compositor.shutdown();

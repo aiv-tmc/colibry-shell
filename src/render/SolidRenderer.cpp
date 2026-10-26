@@ -8,7 +8,7 @@
 
 #include <drm_fourcc.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CLinearBuffer::CLinearBuffer(void* gbmDevice, Hyprutils::Math::Vector2D size) {
         this->size = size;
@@ -91,11 +91,11 @@ namespace Colibry {
         // Wraps the DRM fd in a GBM device.
         m_gbmDevice = gbm_create_device(drmFD);
         if (!m_gbmDevice) {
-            std::fprintf(stderr, "[colibry] renderer: failed to create GBM device\n");
+            std::fprintf(stderr, "[colibry-shell] renderer: failed to create GBM device\n");
             return false;
         }
 
-        std::fprintf(stderr, "[colibry] renderer: GBM device ready\n");
+        std::fprintf(stderr, "[colibry-shell] renderer: GBM device ready\n");
         return true;
     }
 

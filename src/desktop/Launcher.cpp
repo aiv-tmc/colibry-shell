@@ -19,7 +19,7 @@
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CLauncher& CLauncher::get() {
         static CLauncher s_instance;

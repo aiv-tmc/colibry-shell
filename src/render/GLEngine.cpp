@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <cstdio>
 
-namespace Colibry {
+namespace ColibryShell {
 
     static PFNEGLGETPLATFORMDISPLAYEXTPROC     eglGetPlatformDisplayEXT     = nullptr;
     static PFNEGLCREATEIMAGEKHRPROC            eglCreateImageKHR            = nullptr;
@@ -31,6 +31,10 @@ namespace Colibry {
         return m_eglContext != nullptr;
     }
 
+    static void eglError(const char* what) {
+        std::fprintf(stderr, "[colibry-shell] EGL: %s failed (0x%x)\n", what, eglGetError());
+    }
+
     bool CGLEngine::init(int drmFD) {
         if (m_eglContext)
             return true;
@@ -43,33 +47,50 @@ namespace Colibry {
         glEGLImageTargetTexture2DOES = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
 
         if (!eglGetPlatformDisplayEXT || !eglCreateImageKHR || !eglDestroyImageKHR || !glEGLImageTargetTexture2DOES) {
-            std::fprintf(stderr, "[colibry] missing EGL KMS/dmabuf extensions\n");
+            std::fprintf(stderr, "[colibry-shell] missing EGL KMS/dmabuf extensions\n");
             m_failed = true;
             return false;
         }
 
         m_gbmDevice = gbm_create_device(drmFD);
         if (!m_gbmDevice) {
-            std::fprintf(stderr, "[colibry] failed to create the GBM device\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the GBM device (fd %d)\n", drmFD);
             m_failed = true;
             return false;
         }
 
+        // Primary path: platform display on GBM. Some stacks reject it
+        // (EGL_BAD_ALLOC device enumeration quirks) — fall back to the
+        // legacy eglGetDisplay on the GBM device.
         m_eglDisplay = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_gbmDevice, nullptr);
         if (m_eglDisplay == EGL_NO_DISPLAY || eglInitialize((EGLDisplay)m_eglDisplay, nullptr, nullptr) != EGL_TRUE) {
-            std::fprintf(stderr, "[colibry] failed to initialize EGL\n");
-            m_failed = true;
-            return false;
+            if (m_eglDisplay != EGL_NO_DISPLAY)
+                eglError("eglInitialize(platform)");
+            m_eglDisplay = eglGetDisplay((EGLNativeDisplayType)m_gbmDevice);
+            if (m_eglDisplay == EGL_NO_DISPLAY || eglInitialize((EGLDisplay)m_eglDisplay, nullptr, nullptr) != EGL_TRUE) {
+                eglError("eglInitialize(legacy)");
+                m_failed = true;
+                return false;
+            }
         }
 
         eglBindAPI(EGL_OPENGL_ES_API);
 
+        // Strict pbuffer config first; drivers with stripped config lists
+        // get the relaxed ES2-only query.
         EGLint cfgAttribs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
 
         EGLint count = 0;
         void*  config = nullptr;
         eglChooseConfig((EGLDisplay)m_eglDisplay, cfgAttribs, (EGLConfig*)&config, 1, &count);
+
         if (count == 0) {
+            EGLint relaxed[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE};
+            eglChooseConfig((EGLDisplay)m_eglDisplay, relaxed, (EGLConfig*)&config, 1, &count);
+        }
+
+        if (count == 0) {
+            eglError("eglChooseConfig");
             m_failed = true;
             return false;
         }
@@ -77,18 +98,27 @@ namespace Colibry {
         EGLint ctxAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
         m_eglContext = eglCreateContext((EGLDisplay)m_eglDisplay, (EGLConfig)config, EGL_NO_CONTEXT, ctxAttribs);
         if (m_eglContext == EGL_NO_CONTEXT) {
+            eglError("eglCreateContext");
             m_failed = true;
             return false;
         }
 
+        // A tiny pbuffer is the usual makeCurrent placeholder. Drivers
+        // without pbuffer-capable configs (common on virtualized stacks)
+        // fall back to a surfaceless context: every frame renders into
+        // FBOs attached to textures, so no EGL surface is ever needed.
         EGLint surfAttribs[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
         m_eglSurface = eglCreatePbufferSurface((EGLDisplay)m_eglDisplay, (EGLConfig)config, surfAttribs);
-        if (m_eglSurface == EGL_NO_SURFACE) {
+        if (m_eglSurface == EGL_NO_SURFACE)
+            eglGetError(); // clear BAD_MATCH and try surfaceless below
+
+        makeCurrent();
+
+        if (!glGetString(GL_VERSION)) {
+            std::fprintf(stderr, "[colibry-shell] EGL: no current GL context (pbuffer and surfaceless both unavailable)\n");
             m_failed = true;
             return false;
         }
-
-        makeCurrent();
 
         m_progQuad     = compileProgram(QUAD_VERT, QUAD_FRAG);
         m_progSolid    = compileProgram(QUAD_VERT, SOLID_FRAG);
@@ -99,7 +129,7 @@ namespace Colibry {
         m_progMask     = compileProgram(QUAD_VERT, MASK_FRAG);
 
         if (!m_progQuad || !m_progSolid || !m_progTitlebar || !m_progBlurDown || !m_progBlurUp || !m_progDim || !m_progMask) {
-            std::fprintf(stderr, "[colibry] failed to compile GL programs\n");
+            std::fprintf(stderr, "[colibry-shell] failed to compile GL programs\n");
             m_failed = true;
             return false;
         }
@@ -107,11 +137,12 @@ namespace Colibry {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        std::fprintf(stderr, "[colibry] GPU renderer ready\n");
+        std::fprintf(stderr, "[colibry-shell] GPU renderer ready (surfaceless: %s)\n", m_eglSurface == EGL_NO_SURFACE ? "yes" : "no");
         return true;
     }
 
     void CGLEngine::makeCurrent() {
+        // With the surfaceless fallback both surface slots are EGL_NO_SURFACE.
         eglMakeCurrent((EGLDisplay)m_eglDisplay, (EGLSurface)m_eglSurface, (EGLSurface)m_eglSurface, (EGLContext)m_eglContext);
     }
 
@@ -153,8 +184,10 @@ namespace Colibry {
                                        (EGLint)(attrs.modifier & 0xFFFFFFFF), EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(attrs.modifier >> 32), EGL_NONE};
 
         const EGLImage image = eglCreateImageKHR((EGLDisplay)m_eglDisplay, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, imageAttribs);
-        if (image == EGL_NO_IMAGE_KHR)
+        if (image == EGL_NO_IMAGE_KHR) {
+            eglError("eglCreateImageKHR(target)");
             return false;
+        }
 
         // The target texture stays alive while bound so the framebuffer
         // attachment remains valid for the whole frame.
@@ -176,7 +209,12 @@ namespace Colibry {
         glBindFramebuffer(GL_FRAMEBUFFER, m_target.fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_target.tex, 0);
 
-        return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::fprintf(stderr, "[colibry-shell] target framebuffer incomplete\n");
+            return false;
+        }
+
+        return true;
     }
 
     uint32_t CGLEngine::createTexture() {

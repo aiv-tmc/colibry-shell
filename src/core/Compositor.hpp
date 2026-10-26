@@ -23,7 +23,7 @@ namespace Aquamarine {
     class CBackend;
 }
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CDisplay;
     class CSeat;

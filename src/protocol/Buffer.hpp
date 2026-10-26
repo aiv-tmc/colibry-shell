@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <wayland-server.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CBuffer {
       public:

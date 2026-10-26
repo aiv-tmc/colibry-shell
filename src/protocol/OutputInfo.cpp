@@ -9,7 +9,7 @@
 
 #include <wayland-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     COutputInfo& COutputInfo::get() {
         static COutputInfo s_instance;
@@ -27,7 +27,7 @@ namespace Colibry {
         output->size   = size;
         output->global = wl_global_create(m_display->waylandDisplay(), &wl_output_interface, 4, output, &COutputInfo::bind);
         if (!output->global) {
-            std::fprintf(stderr, "[colibry] failed to create wl_output global for %s\n", name.c_str());
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_output global for %s\n", name.c_str());
             delete output;
             return;
         }
@@ -61,7 +61,7 @@ namespace Colibry {
     }
 
     void COutputInfo::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
-        std::fprintf(stderr, "[colibry] client bound wl_output\n");
+        std::fprintf(stderr, "[colibry-shell] client bound wl_output\n");
 
         const auto output = static_cast<SOutput*>(data);
 

@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <pixman.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CGLCompositor& CGLCompositor::get() {
         static CGLCompositor s_instance;
@@ -205,18 +205,21 @@ namespace Colibry {
         if (CSwitcher::get().active()) {
             const bool ok = SwitcherDraw::renderFrame(m_engine, target, damage);
             glDisable(GL_SCISSOR_TEST);
+            glFlush();
             return ok;
         }
 
         if (CLauncher::get().active()) {
             const bool ok = LauncherDraw::renderFrame(m_engine, target, damage);
             glDisable(GL_SCISSOR_TEST);
+            glFlush();
             return ok;
         }
 
         if (fastPath(damage)) {
             SceneDraw::drawCursor(m_engine, m_screenW, m_screenH);
             glDisable(GL_SCISSOR_TEST);
+            glFlush();
             return true;
         }
 
@@ -237,6 +240,9 @@ namespace Colibry {
         }
 
         glDisable(GL_SCISSOR_TEST);
+        // The KMS commit follows immediately; make sure the GPU has the
+        // commands queued before the buffer is handed to the CRTC.
+        glFlush();
         return true;
     }
 

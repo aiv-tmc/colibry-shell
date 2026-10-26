@@ -7,7 +7,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // wl_shm_pool object data: the mapping owned by the pool and the wl_shm
     // resource used to report protocol errors.

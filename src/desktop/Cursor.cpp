@@ -10,7 +10,7 @@
 
 #include <X11/Xcursor/Xcursor.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     static uint64_t nowMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -35,7 +35,7 @@ namespace Colibry {
 
         XcursorImages* images = XcursorLibraryLoadImages("left_ptr", theme.c_str(), size);
         if (!images || images->nimage < 1) {
-            std::fprintf(stderr, "[colibry] failed to load cursor theme '%s'\n", theme.c_str());
+            std::fprintf(stderr, "[colibry-shell] failed to load cursor theme '%s'\n", theme.c_str());
             if (images)
                 XcursorImagesDestroy(images);
             return;
@@ -70,7 +70,7 @@ namespace Colibry {
         m_renderValid    = false;
         m_lastMoveMs     = nowMs();
 
-        std::fprintf(stderr, "[colibry] cursor: %s %dx%d\n", theme.c_str(), (int)m_size.x, (int)m_size.y);
+        std::fprintf(stderr, "[colibry-shell] cursor: %s %dx%d\n", theme.c_str(), (int)m_size.x, (int)m_size.y);
     }
 
     void CCursor::setSpeed(double speed) { m_speed = std::clamp(speed, 0.05, 3.0); }

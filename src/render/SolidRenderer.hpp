@@ -14,7 +14,7 @@
 
 #include <cstdint>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // An Aquamarine buffer backed by a local GBM bo with the linear
     // modifier. The compositor draws into it through CPU access; the backend

@@ -10,7 +10,7 @@
 
 #include <wayland-server.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CRegionResource {
       public:

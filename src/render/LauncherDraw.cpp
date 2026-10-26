@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace LauncherDraw {
 
         namespace {

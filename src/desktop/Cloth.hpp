@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // Grid resolution in cells; 8x8 cells is a good trade-off between
     // visible flex and per-frame CPU cost.

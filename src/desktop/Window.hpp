@@ -1,4 +1,4 @@
-// Desktop window of the Colibry compositor.
+// Desktop window of the ColibryShell compositor.
 //
 // CWindow binds one xdg_toplevel to its wl_surface. Windows float by
 // default, live on a workspace, may be tiled, maximized or fullscreen.
@@ -7,6 +7,11 @@
 // surface from the grab point, and automatic relocations (tiling,
 // snapping, maximizing) visibly settle. Hovered titlebar button state is
 // shared between the input layer and the renderer here.
+//
+// Windows are created exclusively through create(): the returned shared
+// pointer is the single owning reference, pushed into the compositor's
+// window list by the factory. The constructor is public only because
+// makeShared is a free function; outside callers must use create().
 
 #pragma once
 
@@ -20,10 +25,18 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CWindow {
       public:
+        // Creates the window, registers it in the compositor's window list
+        // and sends the initial configure. The only supported construction
+        // path.
+        static Hyprutils::Memory::CSharedPointer<CWindow> create(CSurface* surface, wl_resource* toplevelResource,
+                                                                 wl_resource* xdgSurfaceResource);
+
+        // Public only for makeShared; use create(). Sends the initial
+        // configure so the client may commit.
         CWindow(CSurface* surface, wl_resource* toplevelResource, wl_resource* xdgSurfaceResource);
         ~CWindow();
 
@@ -94,7 +107,7 @@ namespace Colibry {
 
         // True once the closing fade finished and the real close request
         // was sent but the client has not unmapped yet.
-        bool   closeExpired(uint64_t nowMs) const;
+        bool closeExpired(uint64_t nowMs) const;
 
         // Commits a drag outcome (free position or snap box); the cloth
         // keeps its deformed state and springs into the new shape.
@@ -105,8 +118,6 @@ namespace Colibry {
         void sendConfigure(Hyprutils::Math::Vector2D size, const std::vector<uint32_t>& states);
         void sendClose();
         void onMapped();
-
-        Hyprutils::Memory::CSharedPointer<CWindow> m_self;
 
         CSurface*    m_surface;
         wl_resource* m_toplevelResource;

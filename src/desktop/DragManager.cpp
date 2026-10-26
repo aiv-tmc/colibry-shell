@@ -15,7 +15,7 @@
 
 #include <chrono>
 
-namespace Colibry {
+namespace ColibryShell {
 
     using Hyprutils::Math::CBox;
     using Hyprutils::Math::Vector2D;

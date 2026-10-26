@@ -10,7 +10,7 @@
 // Magic identifying dmabuf wl_buffer user data created through linux-dmabuf.
 #include "DMABuf.hpp"
 
-namespace Colibry {
+namespace ColibryShell {
 
     void CSurface::create(wl_client* client, wl_resource* compositor, uint32_t id) {
         const auto resource = wl_resource_create(client, &wl_surface_interface, 6, id);

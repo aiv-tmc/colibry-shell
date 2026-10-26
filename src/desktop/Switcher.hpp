@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CWindow;
 

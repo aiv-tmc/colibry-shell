@@ -13,7 +13,7 @@
 
 #include <xdg-shell-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     struct SXdgSurface {
         CSurface*    surface          = nullptr;
@@ -40,7 +40,7 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &xdg_wm_base_interface, 6, this, &CXdgShell::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create xdg_wm_base global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create xdg_wm_base global\n");
             return false;
         }
 
@@ -48,7 +48,7 @@ namespace Colibry {
     }
 
     void CXdgShell::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
-        std::fprintf(stderr, "[colibry] client bound xdg_wm_base\n");
+        std::fprintf(stderr, "[colibry-shell] client bound xdg_wm_base\n");
 
         const auto resource = wl_resource_create(client, &xdg_wm_base_interface, version, id);
         if (!resource) {
@@ -66,15 +66,13 @@ namespace Colibry {
         wl_resource_set_implementation(resource, &IMPLEMENTATION, data, nullptr);
     }
 
-    void CXdgShell::destroy(wl_client* /*client*/, wl_resource* resource) {
+    void CXdgShell::destroy(wl_client*, wl_resource* resource) {
         wl_resource_destroy(resource);
     }
 
-    void CXdgShell::pong(wl_client* /*client*/, wl_resource* /*resource*/, uint32_t /*serial*/) {
-        // Ping/pong keepalive; nothing to verify.
-    }
+    void CXdgShell::pong(wl_client*, wl_resource*, uint32_t) {}
 
-    void CXdgShell::createPositioner(wl_client* client, wl_resource* /*resource*/, uint32_t id) {
+    void CXdgShell::createPositioner(wl_client* client, wl_resource*, uint32_t id) {
         const auto resource = wl_resource_create(client, &xdg_positioner_interface, 6, id);
         if (!resource) {
             wl_client_post_no_memory(client);
@@ -84,10 +82,7 @@ namespace Colibry {
         auto* positioner = new SPositioner();
 
         static const struct xdg_positioner_interface IMPLEMENTATION = {
-            .destroy =
-                [](wl_client*, wl_resource* res) {
-                    wl_resource_destroy(res);
-                },
+            .destroy = [](wl_client*, wl_resource* res) { wl_resource_destroy(res); },
             .set_size =
                 [](wl_client*, wl_resource* res, int32_t w, int32_t h) {
                     static_cast<SPositioner*>(wl_resource_get_user_data(res))->size = {w, h};
@@ -112,27 +107,16 @@ namespace Colibry {
                 [](wl_client*, wl_resource* res, int32_t x, int32_t y) {
                     static_cast<SPositioner*>(wl_resource_get_user_data(res))->offset = {x, y};
                 },
-            .set_reactive =
-                [](wl_client*, wl_resource*) {
-                    // Reactive popups are re-positioned on parent changes;
-                    // the popup stage consumes this flag.
-                },
-            .set_parent_size =
-                [](wl_client*, wl_resource*, int32_t, int32_t) {
-                    // Parent dimensions feed constraint solving during popup
-                    // placement in the popup stage.
-                },
-            .set_parent_configure =
-                [](wl_client*, wl_resource*, uint32_t) {
-                    // Serial of the parent configure; consumed together with
-                    // the parent size during popup placement.
-                },
+            .set_reactive = [](wl_client*, wl_resource*) {},
+            .set_parent_size = [](wl_client*, wl_resource*, int32_t, int32_t) {},
+            .set_parent_configure = [](wl_client*, wl_resource*, uint32_t) {},
         };
 
-        wl_resource_set_implementation(resource, &IMPLEMENTATION, positioner, [](wl_resource* res) { delete static_cast<SPositioner*>(wl_resource_get_user_data(res)); });
+        wl_resource_set_implementation(resource, &IMPLEMENTATION, positioner,
+                                       [](wl_resource* res) { delete static_cast<SPositioner*>(wl_resource_get_user_data(res)); });
     }
 
-    void CXdgShell::getXdgSurface(wl_client* client, wl_resource* /*resource*/, uint32_t id, wl_resource* surfaceResource) {
+    void CXdgShell::getXdgSurface(wl_client* client, wl_resource*, uint32_t id, wl_resource* surfaceResource) {
         const auto surface = static_cast<CSurface*>(wl_resource_get_user_data(surfaceResource));
 
         const auto resource = wl_resource_create(client, &xdg_surface_interface, 6, id);
@@ -182,7 +166,7 @@ namespace Colibry {
         xdg_surface_send_configure(xdgSurfaceResource, data->configureSerial);
     }
 
-    void CXdgShell::surfaceDestroy(wl_client* /*client*/, wl_resource* resource) {
+    void CXdgShell::surfaceDestroy(wl_client*, wl_resource* resource) {
         wl_resource_destroy(resource);
     }
 
@@ -212,14 +196,16 @@ namespace Colibry {
             .set_minimized    = setMinimized,
         };
 
-        auto* window = new CWindow(data->surface, toplevel, resource);
-        data->window           = Hyprutils::Memory::CSharedPointer<CWindow>(window);
+        // Single ownership: the factory registers the window in the
+        // compositor's list; the surface user data only shares the
+        // reference.
+        data->window           = CWindow::create(data->surface, toplevel, resource);
         data->toplevelResource = toplevel;
 
         wl_resource_set_implementation(toplevel, &IMPLEMENTATION, data, nullptr);
     }
 
-    void CXdgShell::getPopup(wl_client* client, wl_resource* resource, uint32_t id, wl_resource* /*parent*/, wl_resource* positioner) {
+    void CXdgShell::getPopup(wl_client* client, wl_resource* resource, uint32_t id, wl_resource*, wl_resource* positioner) {
         const auto popup = wl_resource_create(client, &xdg_popup_interface, 6, id);
         if (!popup) {
             wl_client_post_no_memory(client);
@@ -239,57 +225,41 @@ namespace Colibry {
         wl_resource_set_implementation(popup, &IMPLEMENTATION, nullptr, nullptr);
     }
 
-    void CXdgShell::setWindowGeometry(wl_client* /*client*/, wl_resource* /*resource*/, int32_t x, int32_t y, int32_t w, int32_t h) {
-        (void)x;
-        (void)y;
-        (void)w;
-        (void)h;
-    }
+    void CXdgShell::setWindowGeometry(wl_client*, wl_resource*, int32_t, int32_t, int32_t, int32_t) {}
 
-    void CXdgShell::ackConfigure(wl_client* /*client*/, wl_resource* resource, uint32_t serial) {
+    void CXdgShell::ackConfigure(wl_client*, wl_resource* resource, uint32_t serial) {
         auto* data = static_cast<SXdgSurface*>(wl_resource_get_user_data(resource));
         if (data && serial == data->configureSerial)
             data->initialConfigureSent = true;
     }
 
-    void CXdgShell::toplevelDestroy(wl_client* /*client*/, wl_resource* resource) {
+    void CXdgShell::toplevelDestroy(wl_client*, wl_resource* resource) {
         wl_resource_destroy(resource);
     }
 
-    void CXdgShell::setParent(wl_client* /*client*/, wl_resource* /*resource*/, wl_resource* /*parent*/) {
-        // Transient parenting is applied when the switcher and stacking
-        // order land in the desktop stage.
-    }
+    void CXdgShell::setParent(wl_client*, wl_resource*, wl_resource*) {}
 
-    void CXdgShell::setTitle(wl_client* /*client*/, wl_resource* resource, const char* title) {
+    void CXdgShell::setTitle(wl_client*, wl_resource* resource, const char* title) {
         auto* data = static_cast<SXdgSurface*>(wl_resource_get_user_data(resource));
         if (data && data->window)
             data->window->setTitle(title ? title : "");
     }
 
-    void CXdgShell::setAppId(wl_client* /*client*/, wl_resource* /*resource*/, const char* /*appId*/) {
-        // The application id groups windows; consumed by window rules.
+    void CXdgShell::setAppId(wl_client*, wl_resource* resource, const char* appId) {
+        auto* data = static_cast<SXdgSurface*>(wl_resource_get_user_data(resource));
+        if (data && data->window)
+            data->window->setAppId(appId ? appId : "");
     }
 
-    void CXdgShell::showWindowMenu(wl_client*, wl_resource*, wl_resource*, uint32_t, int32_t, int32_t) {
-        // The custom title bar replaces the window menu.
-    }
+    void CXdgShell::showWindowMenu(wl_client*, wl_resource*, wl_resource*, uint32_t, int32_t, int32_t) {}
 
-    void CXdgShell::move(wl_client*, wl_resource*, wl_resource*, uint32_t) {
-        // Interactive move is handled by the compositor drag manager.
-    }
+    void CXdgShell::move(wl_client*, wl_resource*, wl_resource*, uint32_t) {}
 
-    void CXdgShell::resize(wl_client*, wl_resource*, wl_resource*, uint32_t, uint32_t) {
-        // Interactive resize is handled by the compositor drag manager.
-    }
+    void CXdgShell::resize(wl_client*, wl_resource*, wl_resource*, uint32_t, uint32_t) {}
 
-    void CXdgShell::setMaxSize(wl_client*, wl_resource*, int32_t, int32_t) {
-        // Size constraints are enforced when tiled states arrive.
-    }
+    void CXdgShell::setMaxSize(wl_client*, wl_resource*, int32_t, int32_t) {}
 
-    void CXdgShell::setMinSize(wl_client*, wl_resource*, int32_t, int32_t) {
-        // Size constraints are enforced when tiled states arrive.
-    }
+    void CXdgShell::setMinSize(wl_client*, wl_resource*, int32_t, int32_t) {}
 
     void CXdgShell::setMaximized(wl_client*, wl_resource* resource) {
         auto* data = static_cast<SXdgSurface*>(wl_resource_get_user_data(resource));
@@ -311,9 +281,8 @@ namespace Colibry {
         auto& compositor = CCompositor::get();
 
         if (!data->window->mapped()) {
-            // A window that asks for fullscreen before its first commit goes
-            // to a fresh empty workspace and opens tiled across it, not in
-            // protocol fullscreen.
+            // A window that asks for fullscreen before its first commit
+            // lands on a fresh empty workspace, tiled across it.
             compositor.moveWindowToWorkspace(data->window.get(), compositor.firstEmptyWorkspace());
             data->window->openTiledFullscreen();
             return;

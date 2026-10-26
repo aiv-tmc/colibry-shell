@@ -5,10 +5,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CConfigManager& CConfigManager::get() {
         static CConfigManager s_instance;
@@ -65,12 +66,26 @@ namespace Colibry {
     bool CConfigManager::load() {
         bool found = false;
 
-        // System defaults first, the user file overrides them.
         found |= loadFile("/etc/colibry/colibry.toml");
 
         const char* home = std::getenv("HOME");
         if (home)
             found |= loadFile(std::string(home) + "/.config/colibry/colibry.toml");
+
+        // No wallpaper configured: fall back to the image shipped with the
+        // shell package so the desktop is not a bare dark fill.
+        if (m_wallpaperPath.empty()) {
+            for (const auto& candidate : {"/usr/local/share/colibry-shell/wallpapers/wallpaper.jpg",
+                                          "/usr/share/colibry-shell/wallpapers/wallpaper.jpg",
+                                          "/usr/local/share/colibry-shell/wallpapers/wallpaper.png",
+                                          "/usr/share/colibry-shell/wallpapers/wallpaper.png"}) {
+                std::error_code ec;
+                if (std::filesystem::exists(candidate, ec)) {
+                    m_wallpaperPath = candidate;
+                    break;
+                }
+            }
+        }
 
         return found;
     }
@@ -108,7 +123,6 @@ namespace Colibry {
     }
 
     void CConfigManager::applyKey(const std::string& section, const std::string& key, const std::string& rawValue) {
-        // Sectioned keys are normalized to their flat names.
         const std::string k = section.empty() ? key : section + "_" + key;
 
         if (k == "wallpaper") {

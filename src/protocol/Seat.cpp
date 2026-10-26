@@ -27,27 +27,32 @@
 
 #include <xkbcommon/xkbcommon.h>
 
-namespace Colibry {
+namespace ColibryShell {
+
+    // Startup fade guard shared by every input handler.
+    static bool inputLocked() {
+        return CCompositor::get().inputLocked();
+    }
 
     bool CSeat::init(CDisplay* display) {
         m_display = display;
 
         m_xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
         if (!m_xkbContext) {
-            std::fprintf(stderr, "[colibry] failed to create the xkb context\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the xkb context\n");
             return false;
         }
 
         m_xkbKeymap = xkb_keymap_new_from_names(m_xkbContext, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
         if (!m_xkbKeymap) {
-            std::fprintf(stderr, "[colibry] failed to compile the xkb keymap\n");
+            std::fprintf(stderr, "[colibry-shell] failed to compile the xkb keymap\n");
             return false;
         }
 
         // The 2-argument variant returns a newly allocated string.
         const char* keymap = xkb_keymap_get_as_string(m_xkbKeymap, XKB_KEYMAP_FORMAT_TEXT_V1);
         if (!keymap) {
-            std::fprintf(stderr, "[colibry] failed to serialize the xkb keymap\n");
+            std::fprintf(stderr, "[colibry-shell] failed to serialize the xkb keymap\n");
             return false;
         }
         m_keymapString = keymap;
@@ -55,28 +60,20 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &wl_seat_interface, 9, this, &CSeat::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create the wl_seat global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the wl_seat global\n");
             return false;
         }
 
-        std::fprintf(stderr, "[colibry] seat ready\n");
+        std::fprintf(stderr, "[colibry-shell] seat ready\n");
         return true;
     }
 
-    const std::string& CSeat::keymapString() const {
-        return m_keymapString;
-    }
-
-    size_t CSeat::keymapSize() const {
-        return m_keymapString.size();
-    }
-
-    bool CSeat::leftButtonDown() const {
-        return m_leftDown;
-    }
+    const std::string& CSeat::keymapString() const { return m_keymapString; }
+    size_t            CSeat::keymapSize() const { return m_keymapString.size(); }
+    bool              CSeat::leftButtonDown() const { return m_leftDown; }
 
     void CSeat::onNewKeyboard(Hyprutils::Memory::CSharedPointer<Aquamarine::IKeyboard> keyboard) {
-        std::fprintf(stderr, "[colibry] keyboard '%s' appeared\n", keyboard->getName().c_str());
+        std::fprintf(stderr, "[colibry-shell] keyboard '%s' appeared\n", keyboard->getName().c_str());
 
         SKeyboard entry;
         entry.keyboard    = keyboard;
@@ -87,7 +84,7 @@ namespace Colibry {
     }
 
     void CSeat::onNewPointer(Hyprutils::Memory::CSharedPointer<Aquamarine::IPointer> pointer) {
-        std::fprintf(stderr, "[colibry] pointer '%s' appeared\n", pointer->getName().c_str());
+        std::fprintf(stderr, "[colibry-shell] pointer '%s' appeared\n", pointer->getName().c_str());
 
         SPointer entry;
         entry.pointer        = pointer;
@@ -131,12 +128,23 @@ namespace Colibry {
     void CSeat::onKey(const Aquamarine::IKeyboard::SKeyEvent& event) {
         auto& compositor = CCompositor::get();
 
-        // Input stays locked during the startup fade and a short grace
-        // period after it.
-        if (compositor.inputLocked())
+        static bool s_firstKeyLogged = false;
+        if (!s_firstKeyLogged) {
+            s_firstKeyLogged = true;
+            std::fprintf(stderr, "[colibry-shell] first key event: key=%u pressed=%d\n", event.key, (int)event.pressed);
+        }
+
+        // Emergency exit, independent of everything else: raw Ctrl+Alt with
+        // Delete or Backspace leaves the session even if xkb, the bind
+        // table or focus handling are broken.
+        if (event.pressed && m_ctrlPressed && m_altPressed && (event.key == KEY_DELETE || event.key == KEY_BACKSPACE)) {
+            CCompositor::requestExit();
+            return;
+        }
+
+        if (inputLocked())
             return;
 
-        // Track the modifier keys themselves for VT switching below.
         if (event.key == KEY_LEFTCTRL || event.key == KEY_RIGHTCTRL)
             m_ctrlPressed = event.pressed;
         if (event.key == KEY_LEFTALT || event.key == KEY_RIGHTALT)
@@ -144,8 +152,6 @@ namespace Colibry {
         if (event.key == KEY_LEFTMETA || event.key == KEY_RIGHTMETA)
             m_superPressed = event.pressed;
 
-        // Update every keyboard state with the event, then evaluate the
-        // key against the first keyboard's state.
         for (auto& entry : m_keyboards)
             xkb_state_update_key(entry.state, event.key + 8, event.pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 
@@ -153,8 +159,6 @@ namespace Colibry {
         if (!primary)
             return;
 
-        // The modifier mask is reduced to the four supported bits so
-        // unrelated locks (NumLock and friends) never break bind matching.
         uint32_t mods = 0;
         if (xkb_state_mod_name_is_active(primary, XKB_MOD_NAME_LOGO, XKB_STATE_MODS_EFFECTIVE) > 0)
             mods |= BIND_SUPER;
@@ -179,9 +183,6 @@ namespace Colibry {
             return;
         }
 
-        // Overlays consume keys first: the launcher edits its filter, the
-        // switcher cycles and activates, and nothing reaches clients while
-        // an overlay is up.
         if (CLauncher::get().active()) {
             CLauncher::get().onKey(sym, mods, event.pressed);
             return;
@@ -201,14 +202,12 @@ namespace Colibry {
             return;
         }
 
-        const bool consumed = CKeybindManager::get().handle(sym, mods, event.pressed);
-        if (consumed)
+        if (CKeybindManager::get().handle(sym, mods, event.pressed))
             return;
 
         if (!m_focusedSurface)
             return;
 
-        // Forward the raw event to the focused client's keyboards.
         const auto serial = wl_display_next_serial(m_display->waylandDisplay());
         const auto client = wl_resource_get_client(m_focusedSurface->resource());
 
@@ -220,18 +219,11 @@ namespace Colibry {
 
     void CSeat::onPointerMove(const Aquamarine::IPointer::SMoveEvent& event) {
         auto& compositor = CCompositor::get();
-
-        // Input stays locked during the startup fade and a short grace
-        // period after it.
-        if (compositor.inputLocked())
+        if (inputLocked())
             return;
 
         compositor.addDamage(compositor.m_cursor->damageBox());
-
-        // Feeding the motion into the drag manager also updates the
-        // hovered titlebar buttons and the client pointer focus.
         CDragManager::get().onMove(event.delta);
-
         compositor.addDamage(compositor.m_cursor->damageBox());
 
         const auto pos    = compositor.m_cursor->position();
@@ -247,21 +239,32 @@ namespace Colibry {
 
     void CSeat::onPointerWarp(const Aquamarine::IPointer::SWarpEvent& event) {
         auto& compositor = CCompositor::get();
-
-        // Input stays locked during the startup fade and a short grace
-        // period after it.
-        if (compositor.inputLocked())
+        if (inputLocked())
             return;
 
-        // Absolute positioning is a teleport: the drawn cursor snaps.
+        // Some absolute devices (and broken VMs) emit coordinates outside
+        // the screen; clamping keeps the cursor on the desktop instead of
+        // letting it "mirror" through the opposite edge.
+        const auto& outputs = compositor.m_outputs;
+        const auto  bounds  = outputs.empty() ? Hyprutils::Math::Vector2D(1920, 1080) : outputs.front()->size();
+
+        Hyprutils::Math::Vector2D pos(
+            std::clamp(event.absolute.x, 0.0, std::max(0.0, bounds.x - 1.0)),
+            std::clamp(event.absolute.y, 0.0, std::max(0.0, bounds.y - 1.0)));
+
+        static bool s_firstWarpLogged = false;
+        if (!s_firstWarpLogged) {
+            s_firstWarpLogged = true;
+            std::fprintf(stderr, "[colibry-shell] first absolute warp: %.1f,%.1f (bounds %.0fx%.0f)\n", event.absolute.x, event.absolute.y, bounds.x,
+                         bounds.y);
+        }
+
         compositor.addDamage(compositor.m_cursor->damageBox());
-        compositor.m_cursor->setPosition(event.absolute);
+        compositor.m_cursor->setPosition(pos);
         compositor.m_cursor->snapRender();
         compositor.addDamage(compositor.m_cursor->damageBox());
 
-        const auto pos    = compositor.m_cursor->position();
         const auto serial = wl_display_next_serial(compositor.m_display->waylandDisplay());
-
         for (const auto res : m_pointerResources) {
             updatePointerFocus(res, pos, serial);
             wl_pointer_send_motion(res, event.timeMs, wl_fixed_from_double(pos.x), wl_fixed_from_double(pos.y));
@@ -272,10 +275,7 @@ namespace Colibry {
 
     void CSeat::onPointerButton(const Aquamarine::IPointer::SButtonEvent& event) {
         auto& compositor = CCompositor::get();
-
-        // Input stays locked during the startup fade and a short grace
-        // period after it.
-        if (compositor.inputLocked())
+        if (inputLocked())
             return;
 
         const auto serial = wl_display_next_serial(compositor.m_display->waylandDisplay());
@@ -305,10 +305,7 @@ namespace Colibry {
 
     void CSeat::onPointerAxis(const Aquamarine::IPointer::SAxisEvent& event) {
         auto& compositor = CCompositor::get();
-
-        // Input stays locked during the startup fade and a short grace
-        // period after it.
-        if (compositor.inputLocked())
+        if (inputLocked())
             return;
 
         const uint32_t axis = static_cast<uint32_t>(event.axis) == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? WL_POINTER_AXIS_HORIZONTAL_SCROLL :
@@ -387,7 +384,7 @@ namespace Colibry {
     }
 
     void CSeat::sendKeymap(wl_resource* keyboardResource) {
-        const auto fd = memfd_create("colibry-keymap", MFD_CLOEXEC);
+        const auto fd = memfd_create("colibry-shell-keymap", MFD_CLOEXEC);
         if (fd < 0)
             return;
 

@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     struct SMonitorRule {
         std::string name;

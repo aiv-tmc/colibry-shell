@@ -1,21 +1,25 @@
-// GLES2 shader sources for the Colibry GPU renderer.
+// GLES2 shader sources for the ColibryShell GPU renderer.
 //
 // Every visual primitive of the desktop is drawn by one of these programs:
 // textured quads with signed-distance rounded corners (window content,
-// wallpaper, cursor, switcher cards), the titlebar gradient that derives
-// its colors from the window content texture, the Kawase blur chain used
-// by overlays, the selection falloff dim used by the switcher and the
-// screen corner mask. All geometry is emitted as a single unit quad per
-// primitive; positioning happens in the vertex shader through uniforms.
+// wallpaper, cursor, cards), the titlebar gradient that derives its colors
+// from the window content texture, the Kawase blur chain used by overlays,
+// the selection falloff dim used by the switcher and the screen corner
+// mask. All geometry is emitted as a single unit quad per primitive;
+// positioning happens in the vertex shader through uniforms.
+//
+// Desktop coordinates are top-left origin. The KMS framebuffer bound
+// through EGL_LINUX_DMA_BUF scans out with memory row 0 at the top, while
+// GL clip space treats ndc y = -1 as the first row of the render target;
+// the Y negation maps desktop top onto that first row.
 
 #pragma once
 
-namespace Colibry {
+namespace ColibryShell {
 
     // Shared vertex shader: places a unit quad at uDstOrigin/uDstSize in
-    // desktop pixel coordinates (top-left origin) and converts to NDC with
-    // a Y flip for the GL bottom-left origin. The same unit coordinates
-    // serve as texture UVs.
+    // desktop pixel coordinates and converts to NDC with a Y flip (desktop
+    // top-left origin vs GL bottom-left row order).
     static const char* QUAD_VERT = "attribute vec2 aPos;"
                                    "attribute vec2 aUV;"
                                    "varying vec2 vUV;"

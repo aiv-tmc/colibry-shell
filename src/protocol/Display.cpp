@@ -13,7 +13,7 @@
 
 #include <cstdio>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // Logs every client connection; used to trace which stage of the
     // protocol handshake a stuck client reached.
@@ -23,7 +23,7 @@ namespace Colibry {
         pid_t pid = 0;
         wl_client_get_credentials(client, &pid, nullptr, nullptr);
 
-        std::fprintf(stderr, "[colibry] client connected (pid %d)\n", (int)pid);
+        std::fprintf(stderr, "[colibry-shell] client connected (pid %d)\n", (int)pid);
     }
 
     static wl_listener* clientCreatedListener() {
@@ -34,7 +34,7 @@ namespace Colibry {
     bool CDisplay::init() {
         m_display = wl_display_create();
         if (!m_display) {
-            std::fprintf(stderr, "[colibry] failed to create wl_display\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_display\n");
             return false;
         }
 
@@ -42,33 +42,33 @@ namespace Colibry {
 
         m_compositorGlobal = wl_global_create(m_display, &wl_compositor_interface, 6, this, &CDisplay::bindCompositor);
         if (!m_compositorGlobal) {
-            std::fprintf(stderr, "[colibry] failed to create wl_compositor global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_compositor global\n");
             return false;
         }
 
         m_shmGlobal = wl_global_create(m_display, &wl_shm_interface, 2, this, &CShm::bind);
         if (!m_shmGlobal) {
-            std::fprintf(stderr, "[colibry] failed to create wl_shm global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_shm global\n");
             return false;
         }
 
         // wl_subcompositor is required by the GTK and Qt toolkits; without
         // it toolkit applications refuse to open the display.
         if (!CSubcompositor::get().init(this))
-            std::fprintf(stderr, "[colibry] wl_subcompositor unavailable\n");
+            std::fprintf(stderr, "[colibry-shell] wl_subcompositor unavailable\n");
 
         COutputInfo::get().init(this);
         if (!CForeignToplevelManager::get().init(this))
-            std::fprintf(stderr, "[colibry] foreign toplevel management unavailable\n");
+            std::fprintf(stderr, "[colibry-shell] foreign toplevel management unavailable\n");
 
         const auto socketName = wl_display_add_socket_auto(m_display);
         if (!socketName) {
-            std::fprintf(stderr, "[colibry] failed to create a wayland socket\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create a wayland socket\n");
             return false;
         }
 
         m_socketName = socketName;
-        std::fprintf(stderr, "[colibry] wayland socket: WAYLAND_DISPLAY=%s\n", m_socketName.c_str());
+        std::fprintf(stderr, "[colibry-shell] wayland socket: WAYLAND_DISPLAY=%s\n", m_socketName.c_str());
         return true;
     }
 
@@ -120,7 +120,7 @@ namespace Colibry {
     }
 
     void CDisplay::bindCompositor(wl_client* client, void* data, uint32_t version, uint32_t id) {
-        std::fprintf(stderr, "[colibry] client bound wl_compositor\n");
+        std::fprintf(stderr, "[colibry-shell] client bound wl_compositor\n");
 
         const auto self = static_cast<CDisplay*>(data);
 

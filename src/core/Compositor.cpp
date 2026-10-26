@@ -34,7 +34,7 @@
 #include <poll.h>
 #include <unistd.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     using Hyprutils::Math::CBox;
     using Hyprutils::Math::CRegion;
@@ -69,13 +69,13 @@ namespace Colibry {
     }
 
     static void watchdogHandler(int) {
-        static const char MSG[] = "[colibry] watchdog: no frame presented at startup, exiting\n";
+        static const char MSG[] = "[colibry-shell] watchdog: no frame presented at startup, exiting\n";
         write(STDERR_FILENO, MSG, sizeof(MSG) - 1);
         _exit(1);
     }
 
     static std::string resolveTerminal() {
-        if (const char* env = std::getenv("COLIBRY_TERMINAL"))
+        if (const char* env = std::getenv("COLIBRYSHELL_TERMINAL"))
             if (*env)
                 return env;
 
@@ -98,7 +98,7 @@ namespace Colibry {
 
         execlp("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
 
-        std::fprintf(stderr, "[colibry] no terminal found; set terminal= in colibry.toml\n");
+        std::fprintf(stderr, "[colibry-shell] no terminal found; set terminal= in colibry.toml\n");
         _exit(1);
     }
 
@@ -115,39 +115,30 @@ namespace Colibry {
             return m_renderer;
 
         if (!m_backend || !m_backend->primaryAllocator) {
-            std::fprintf(stderr, "[colibry] no DRM allocator available\n");
+            std::fprintf(stderr, "[colibry-shell] no DRM allocator available\n");
             return nullptr;
         }
 
         m_renderer = Hyprutils::Memory::makeShared<CClearRenderer>();
         if (!m_renderer->init(m_backend->primaryAllocator->drmFD())) {
-            std::fprintf(stderr, "[colibry] failed to initialize the buffer factory\n");
+            std::fprintf(stderr, "[colibry-shell] failed to initialize the buffer factory\n");
             m_renderer.reset();
         }
 
         return m_renderer;
     }
 
-    void CCompositor::requestExit() {
-        get().m_eventLoop.quit();
-    }
+    void CCompositor::requestExit() { get().m_eventLoop.quit(); }
 
-    bool CCompositor::isShuttingDown() const {
-        return m_shutdown;
-    }
+    bool CCompositor::isShuttingDown() const { return m_shutdown; }
 
     void CCompositor::notifyFramePresented() {
         g_framePresented = 1;
         alarm(0);
     }
 
-    uint64_t CCompositor::startMs() const {
-        return m_startMs;
-    }
-
-    uint64_t CCompositor::currentMs() const {
-        return nowMs();
-    }
+    uint64_t CCompositor::startMs() const { return m_startMs; }
+    uint64_t CCompositor::currentMs() const { return nowMs(); }
 
     double CCompositor::fadeFactor(uint64_t now) const {
         const int fadeMs = m_config ? m_config->loginFadeMs() : 750;
@@ -165,7 +156,7 @@ namespace Colibry {
     }
 
     bool CCompositor::init() {
-        std::fprintf(stderr, "[colibry] starting compositor %s\n", COLIBRY_VERSION);
+        std::fprintf(stderr, "[colibry-shell] starting compositor %s\n", COLIBRYSHELL_VERSION);
 
         m_startMs = nowMs();
 
@@ -187,24 +178,24 @@ namespace Colibry {
 
         m_display = Hyprutils::Memory::makeShared<CDisplay>();
         if (!m_display->init()) {
-            std::fprintf(stderr, "[colibry] failed to initialize the wayland display\n");
+            std::fprintf(stderr, "[colibry-shell] failed to initialize the wayland display\n");
             return false;
         }
 
         m_seat = Hyprutils::Memory::makeShared<CSeat>();
         if (!m_seat->init(m_display.get())) {
-            std::fprintf(stderr, "[colibry] failed to initialize the seat\n");
+            std::fprintf(stderr, "[colibry-shell] failed to initialize the seat\n");
             return false;
         }
 
         m_xdgShell = Hyprutils::Memory::makeShared<CXdgShell>();
         if (!m_xdgShell->init(m_display.get())) {
-            std::fprintf(stderr, "[colibry] failed to initialize xdg-shell\n");
+            std::fprintf(stderr, "[colibry-shell] failed to initialize xdg-shell\n");
             return false;
         }
 
         if (!CDataDeviceManager::get().init(m_display.get()))
-            std::fprintf(stderr, "[colibry] clipboard unavailable\n");
+            std::fprintf(stderr, "[colibry-shell] clipboard unavailable\n");
 
         Aquamarine::SBackendImplementationOptions drm;
         drm.backendType        = Aquamarine::AQ_BACKEND_DRM;
@@ -219,7 +210,7 @@ namespace Colibry {
 
         m_backend = Aquamarine::CBackend::create({drm, wayland}, options);
         if (!m_backend) {
-            std::fprintf(stderr, "[colibry] failed to create the backend\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the backend\n");
             return false;
         }
 
@@ -235,40 +226,63 @@ namespace Colibry {
             get().m_seat->onNewPointer(pointer);
         });
 
+        // Outputs may appear during start(), before the GPU renderer
+        // exists; their setup is deferred and retried below.
         if (!m_backend->start()) {
-            std::fprintf(stderr, "[colibry] failed to start the backend\n");
+            std::fprintf(stderr, "[colibry-shell] failed to start the backend\n");
             return false;
         }
 
-        // The GPU renderer needs the DRM node of the KMS backend.
         if (!m_backend->primaryAllocator) {
-            std::fprintf(stderr, "[colibry] GPU rendering unavailable; nested sessions are not supported\n");
+            std::fprintf(stderr, "[colibry-shell] GPU rendering unavailable; nested sessions are not supported\n");
             return false;
         }
 
         if (!CGLCompositor::get().init(m_backend->primaryAllocator->drmFD())) {
-            std::fprintf(stderr, "[colibry] GPU renderer failed to initialize\n");
+            std::fprintf(stderr, "[colibry-shell] GPU renderer failed to initialize\n");
             return false;
         }
 
         CGLCompositor::get().setScreenRounding(m_config->screenRounding());
         if (!SceneDraw::initTitleFont(m_config->titlebarFont().c_str()))
-            std::fprintf(stderr, "[colibry] titlebar font unavailable; titles will be blank\n");
+            std::fprintf(stderr, "[colibry-shell] titlebar font unavailable; titles will be blank\n");
+
+        // Late setup for outputs that arrived during backend start.
+        for (const auto& output : m_outputs) {
+            if (output->presented())
+                continue;
+            if (!output->setup())
+                std::fprintf(stderr, "[colibry-shell] failed to set up output %s\n", output->aq()->name.c_str());
+        }
+
+        if (m_outputs.empty() || !m_outputs.front()->presented()) {
+            std::fprintf(stderr, "[colibry-shell] no outputs presented, aborting\n");
+            return false;
+        }
 
         if (!CLauncher::get().init())
-            std::fprintf(stderr, "[colibry] launcher: no applications found\n");
+            std::fprintf(stderr, "[colibry-shell] launcher: no applications found\n");
 
         registerPollFDs();
 
         m_eventLoop.addFD(m_display->fd(), POLLIN | POLLOUT, [this](short) { m_display->dispatch(); });
 
-        // Frame tick: advances cursor smoothing, window open animations,
-        // cloth physics and closing fades, then presents outputs with
-        // pending damage.
+        // Frame tick: cursor smoothing, cloth physics, closing fades, open
+        // animations, then presents outputs with pending damage.
         m_eventLoop.addTimer(FRAME_INTERVAL_MS, [] {
             auto& self = get();
 
             const auto now = nowMs();
+            for (const auto& output : self.m_outputs) {
+                // Completing frames here as well keeps a steady cadence on
+                // stacks whose backend never emits the frame event.
+                if (output->framePending() && now - output->lastCommitMs() > 33)
+                    output->recoverFrame();
+
+                if (output->needsRender())
+                    output->present();
+            }
+
             const auto dt  = s_lastTickMs ? now - s_lastTickMs : (uint64_t)FRAME_INTERVAL_MS;
             s_lastTickMs   = now;
 
@@ -293,7 +307,6 @@ namespace Colibry {
                 animating = true;
             }
 
-            // Clients that ignored the close request are removed by force.
             for (auto* window : expired)
                 self.removeWindow(window);
 
@@ -303,8 +316,8 @@ namespace Colibry {
             }
         });
 
-        // Liveness heal: re-announces backend descriptors and forces a full
-        // redraw after a long stall (for example a VT switch).
+        // Liveness heal: re-announce backend descriptors, force damage
+        // after stalls (VT switches).
         m_eventLoop.addTimer(2000, [] {
             auto& self = get();
 
@@ -322,13 +335,13 @@ namespace Colibry {
 
         m_ipc = Hyprutils::Memory::makeShared<CIPC>();
         if (!m_ipc->start(m_eventLoop)) {
-            std::fprintf(stderr, "[colibry] IPC unavailable, continuing without it\n");
+            std::fprintf(stderr, "[colibry-shell] IPC unavailable, continuing without it\n");
             m_ipc.reset();
         }
 
         spawnAutostart(m_display.get());
 
-        std::fprintf(stderr, "[colibry] %zu output(s) active\n", m_outputs.size());
+        std::fprintf(stderr, "[colibry-shell] %zu output(s) active\n", m_outputs.size());
         return true;
     }
 
@@ -338,28 +351,37 @@ namespace Colibry {
     }
 
     void CCompositor::onNewOutput(Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> output) {
-        std::fprintf(stderr, "[colibry] output '%s' appeared\n", output->name.c_str());
+        std::fprintf(stderr, "[colibry-shell] output '%s' appeared\n", output->name.c_str());
 
         const auto ctx = Hyprutils::Memory::makeShared<COutput>(output);
 
-        if (!ctx->setup()) {
-            std::fprintf(stderr, "[colibry] failed to set up output %s\n", output->name.c_str());
-            return;
+        if (m_outputs.empty()) {
+            // The native pixel size comes from the output's mode list; it
+            // is valid before the first mode is committed to the CRTC.
+            const auto mode = output->preferredMode() ? output->preferredMode() :
+                                                        (output->modes.empty() ? nullptr : output->modes.front());
+
+            if (mode) {
+                m_cursor->setBounds(mode->pixelSize);
+                m_cursor->setPosition(mode->pixelSize / 2.0);
+                m_cursor->snapRender();
+            }
         }
 
-        COutputInfo::get().addOutput(output->name, ctx->size());
-
-        if (m_outputs.empty()) {
-            m_cursor->setBounds(ctx->size());
-            m_cursor->setPosition(ctx->size() / 2.0);
-            m_cursor->snapRender();
-            addFullDamage();
+        // During backend start the GPU renderer is not ready yet; the
+        // output is registered now and set up by the retry in init().
+        if (CGLCompositor::get().ready()) {
+            if (!ctx->setup())
+                std::fprintf(stderr, "[colibry-shell] failed to set up output %s\n", output->name.c_str());
+            else
+                COutputInfo::get().addOutput(output->name, ctx->size());
         }
 
         m_outputs.push_back(ctx);
     }
 
     int CCompositor::run() {
+        std::signal(SIGUSR1, [](int) { requestExit(); });
         std::signal(SIGINT, [](int) { requestExit(); });
         std::signal(SIGTERM, [](int) { requestExit(); });
 
@@ -371,14 +393,14 @@ namespace Colibry {
         if (!g_framePresented)
             alarm(20);
 
-        std::fprintf(stderr, "[colibry] entering event loop\n");
+        std::fprintf(stderr, "[colibry-shell] entering event loop\n");
         const int code = m_eventLoop.run();
         m_shutdown     = true;
         return code;
     }
 
     void CCompositor::shutdown() {
-        std::fprintf(stderr, "[colibry] shutting down\n");
+        std::fprintf(stderr, "[colibry-shell] shutting down\n");
 
         m_windows.clear();
         m_outputs.clear();
@@ -601,10 +623,7 @@ namespace Colibry {
         }
     }
 
-    void CCompositor::toggleTilingMode() {
-        // Master/stack is the only layout; retiles the workspace in place.
-        applyTiling();
-    }
+    void CCompositor::toggleTilingMode() { applyTiling(); }
 
     void CCompositor::focusOnWorkspace(int workspace) {
         for (auto it = m_windows.rbegin(); it != m_windows.rend(); ++it) {
@@ -616,9 +635,7 @@ namespace Colibry {
         focusWindow(nullptr);
     }
 
-    int CCompositor::currentWorkspace() const {
-        return m_currentWorkspace;
-    }
+    int CCompositor::currentWorkspace() const { return m_currentWorkspace; }
 
     bool CCompositor::workspaceHasTiling() const {
         for (const auto& w : m_windows)

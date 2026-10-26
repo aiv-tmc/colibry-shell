@@ -1,10 +1,10 @@
-# Build definition for the Colibry compositor.
+# Build definition for the ColibryShell compositor.
 
 cmake_minimum_required(VERSION 3.27)
 
 project(
-  colibry
-  VERSION 0.1.0
+  colibryshell
+  VERSION 0.2.0
   DESCRIPTION "A from-scratch Wayland compositor on the Aquamarine backend library"
   LANGUAGES C CXX
 )
@@ -34,7 +34,7 @@ pkg_check_modules(LIBJPEG REQUIRED IMPORTED_TARGET libjpeg)
 pkg_check_modules(XCURSOR REQUIRED IMPORTED_TARGET xcursor)
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 
-add_compile_definitions(COLIBRY_VERSION="${PROJECT_VERSION}")
+add_compile_definitions(COLIBRYSHELL_VERSION="${PROJECT_VERSION}")
 
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
@@ -71,11 +71,11 @@ foreach(xml ${PROTOCOL_XMLS})
   list(APPEND PROTOCOL_GENERATED "${code}" "${header}")
 endforeach()
 
-add_library(colibry-protocols STATIC "${PROTOCOL_GENERATED}")
-target_include_directories(colibry-protocols PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
+add_library(colibryshell-protocols STATIC "${PROTOCOL_GENERATED}")
+target_include_directories(colibryshell-protocols PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
 
 add_executable(
-  colibry
+  colibry-shell
   src/main.cpp
   src/core/EventLoop.cpp
   src/core/Compositor.cpp
@@ -110,12 +110,12 @@ add_executable(
   src/wallpaper/WallpaperEngine.cpp
 )
 
-target_include_directories(colibry PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(colibry-shell PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_link_libraries(
-  colibry
+  colibry-shell
   PRIVATE
-  colibry-protocols
+  colibryshell-protocols
   PkgConfig::AQUAMARINE
   PkgConfig::HYPRUTILS
   PkgConfig::WAYLAND_SERVER
@@ -134,24 +134,47 @@ target_link_libraries(
 
 add_executable(colibryctl src/ipc/ctl.cpp)
 
-install(TARGETS colibry colibryctl RUNTIME DESTINATION bin)
+install(TARGETS colibry-shell colibryctl RUNTIME DESTINATION bin)
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/"
-        DESTINATION share/colibry/wallpapers
+        DESTINATION share/colibry-shell/wallpapers
         FILES_MATCHING PATTERN "*.png" PATTERN "*.jpg" PATTERN "*.jpeg")
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/colibry.toml"
         DESTINATION share/colibry
         OPTIONAL)
 
-set(COLIBRY_SESSION_DIR "share/wayland-sessions")
+set(COLIBRYSHELL_SESSION_DIR "share/wayland-sessions")
 install(CODE "
-  file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/${COLIBRY_SESSION_DIR}\")
-  file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${COLIBRY_SESSION_DIR}/colibry.desktop\"
+  file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/${COLIBRYSHELL_SESSION_DIR}\")
+  file(WRITE \"\${CMAKE_INSTALL_PREFIX}/${COLIBRYSHELL_SESSION_DIR}/colibry-shell.desktop\"
 \"[Desktop Entry]
-Name=Colibry
-Comment=Colibry Wayland compositor
-Exec=\${CMAKE_INSTALL_PREFIX}/bin/colibry
+Name=Colibry Shell
+Comment=Colibry Shell Wayland compositor
+Exec=\${CMAKE_INSTALL_PREFIX}/bin/colibry-shell
 Type=Application
 \")
 ")
+
+# Unit tests run head-less (no GPU, no Wayland session). Each test file is
+# its own executable because every test carries its own main().
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(colibry-test-cloth
+    tests/test_cloth.cpp
+    src/desktop/Cloth.cpp
+  )
+  target_link_libraries(colibry-test-cloth PRIVATE PkgConfig::HYPRUTILS)
+
+  add_executable(colibry-test-chromegeom
+    tests/test_chromegeom.cpp
+    src/config/ConfigManager.cpp
+  )
+  target_link_libraries(colibry-test-chromegeom PRIVATE PkgConfig::HYPRUTILS)
+
+  add_test(NAME cloth COMMAND colibry-test-cloth)
+  set_tests_properties(cloth PROPERTIES PASS_REGULAR_EXPRESSION "all tests passed")
+
+  add_test(NAME chromegeom COMMAND colibry-test-chromegeom)
+  set_tests_properties(chromegeom PROPERTIES PASS_REGULAR_EXPRESSION "all tests passed")
+endif()

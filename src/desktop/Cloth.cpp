@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace Colibry {
+namespace ColibryShell {
 
     using Hyprutils::Math::CBox;
     using Hyprutils::Math::Vector2D;
@@ -78,11 +78,16 @@ namespace Colibry {
     void CCloth::grab(const Vector2D& local) {
         m_mesh.pinned = true;
 
+        // The caller passes window-local coordinates; rest positions are
+        // absolute, so compare against the box-relative vertex positions.
+        const Vector2D origin = m_mesh.rest[0];
+
         double best = 1e18;
         for (int i = 0; i < vertexCount(); ++i) {
-            const double dx = m_mesh.rest[i].x - local.x;
-            const double dy = m_mesh.rest[i].y - local.y;
-            const double d  = dx * dx + dy * dy;
+            const Vector2D rel = m_mesh.rest[i] - origin;
+            const double dx    = rel.x - local.x;
+            const double dy    = rel.y - local.y;
+            const double d     = dx * dx + dy * dy;
             if (d < best) {
                 best            = d;
                 m_mesh.pinIndex = i;
@@ -150,13 +155,17 @@ namespace Colibry {
             m_mesh.rest[i] = r;
         }
 
+        // The pin target is the window's logical origin; the pinned vertex
+        // sits at the grab point inside the window.
+        const Vector2D pinAbs = m_mesh.pinTarget + m_mesh.pinLocal;
+
         // Verlet integration with a soft pull toward rest: inertia keeps
         // the overshoot, the pull keeps the sheet coherent.
         double maxDev = 0.0;
         for (int i = 0; i < vertexCount(); ++i) {
             if (m_mesh.pinned && i == m_mesh.pinIndex) {
-                m_mesh.pos[i]  = m_mesh.pinTarget;
-                m_mesh.prev[i] = m_mesh.pinTarget;
+                m_mesh.pos[i]  = pinAbs;
+                m_mesh.prev[i] = pinAbs;
                 continue;
             }
 
@@ -169,8 +178,6 @@ namespace Colibry {
             maxDev = std::max(maxDev, std::abs(m_mesh.pos[i].y - m_mesh.rest[i].y));
         }
 
-        // Distance constraints keep adjacent vertices at their rest
-        // spacing, which is what makes the surface read as one material.
         const double cellW = boxSize.x / CLOTH_COLS;
         const double cellH = boxSize.y / CLOTH_ROWS;
 

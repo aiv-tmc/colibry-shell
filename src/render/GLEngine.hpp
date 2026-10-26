@@ -16,7 +16,7 @@
 
 #include <cstdint>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CGLEngine {
       public:

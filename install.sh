@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Generic Linux installer for the Colibry compositor.
+# Generic Linux installer for the ColibryShell compositor.
 #
-# Builds the project with CMake, installs binaries, the Wayland session
+# Builds the project with CMake, installs the binaries, the Wayland session
 # file, the wallpaper assets from assets/ and the default system
-# configuration from assets/colibry.toml (placeholder @PREFIX@ expands to
-# the installation prefix).
+# configuration to /etc/colibry/colibry.toml (the configuration namespace
+# belongs to the Colibry OS and stays unchanged).
 #
 # Usage: ./install.sh [--prefix /usr/local]
 set -euo pipefail
@@ -54,6 +54,6 @@ else
 fi
 
 echo
-echo "Colibry installed to $PREFIX"
+echo "ColibryShell installed to $PREFIX"
 echo "Config: /etc/colibry/colibry.toml"
 echo "Ctrl+Alt+Del exits the session."

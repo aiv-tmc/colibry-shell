@@ -7,7 +7,7 @@
 
 #include <algorithm>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CSwitcher& CSwitcher::get() {
         static CSwitcher s_instance;

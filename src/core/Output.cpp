@@ -21,11 +21,10 @@
 #include <drm_fourcc.h>
 #include <pixman.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     static constexpr uint32_t BACKGROUND_COLOR = 0xFF14171C;
 
-    // Steady frame cadence (~60 Hz) and the backoff after a failed commit.
     static constexpr uint64_t COMMIT_INTERVAL_MS = 17;
     static constexpr uint64_t COMMIT_BACKOFF_MS  = 24;
 
@@ -33,8 +32,23 @@ namespace Colibry {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
+    // Puts a region back into the global damage pool box by box (the pool
+    // only accepts boxes).
+    static void readdDamage(const Hyprutils::Math::CRegion& damage) {
+        auto& compositor = CCompositor::get();
+
+        int         count = 0;
+        const auto* rects = pixman_region32_rectangles(damage.pixman(), &count);
+
+        for (int i = 0; i < count; ++i) {
+            compositor.addDamage({Hyprutils::Math::Vector2D((double)rects[i].x1, (double)rects[i].y1),
+                                  Hyprutils::Math::Vector2D((double)(rects[i].x2 - rects[i].x1), (double)(rects[i].y2 - rects[i].y1))});
+        }
+    }
+
     COutput::COutput(Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> output) : m_output(output) {
         m_destroyListener = m_output->events.destroy.listen([this]() { onBackendDestroy(); });
+        m_frameListener   = m_output->events.frame.listen([this]() { onFrame(); });
     }
 
     Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> COutput::aq() const {
@@ -99,11 +113,10 @@ namespace Colibry {
 
         int wantW = 0, wantH = 0;
         if (std::sscanf(rule->resolution.c_str(), "%dx%d", &wantW, &wantH) != 2 || wantW <= 0 || wantH <= 0) {
-            std::fprintf(stderr, "[colibry] invalid monitor resolution '%s', using preferred\n", rule->resolution.c_str());
+            std::fprintf(stderr, "[colibry-shell] invalid monitor resolution '%s', using preferred\n", rule->resolution.c_str());
             return fallbackMode();
         }
 
-        // Closest mode to the configured resolution wins.
         Hyprutils::Memory::CSharedPointer<Aquamarine::SOutputMode> best;
         int bestDistance = -1;
         for (const auto& m : m_output->modes) {
@@ -124,13 +137,13 @@ namespace Colibry {
 
         const auto factory = CCompositor::get().renderer();
         if (!factory) {
-            std::fprintf(stderr, "[colibry] %s: buffer factory unavailable\n", m_output->name.c_str());
+            std::fprintf(stderr, "[colibry-shell] %s: buffer factory unavailable\n", m_output->name.c_str());
             return false;
         }
 
         m_buffer = factory->createLinearBuffer(size);
         if (!m_buffer) {
-            std::fprintf(stderr, "[colibry] failed to allocate a buffer for %s\n", m_output->name.c_str());
+            std::fprintf(stderr, "[colibry-shell] failed to allocate a buffer for %s\n", m_output->name.c_str());
             return false;
         }
 
@@ -147,15 +160,13 @@ namespace Colibry {
         if (wallpaper && wallpaper->hasImage())
             wallpaper->draw(m_backgroundPixels.data(), m_pixelSize.x, m_pixelSize.x, m_pixelSize.y);
 
-        // Hand the pixels to the GPU renderer; the upload happens lazily
-        // on the next frame inside the EGL context.
         CGLCompositor::get().updateBackground(m_backgroundPixels, m_pixelSize.x, m_pixelSize.y);
     }
 
     bool COutput::setup() {
         const auto mode = pickMode();
         if (!mode) {
-            std::fprintf(stderr, "[colibry] %s: no usable mode\n", m_output->name.c_str());
+            std::fprintf(stderr, "[colibry-shell] %s: no usable mode\n", m_output->name.c_str());
             return false;
         }
 
@@ -166,7 +177,6 @@ namespace Colibry {
         m_output->state->setEnabled(true);
         m_output->state->setMode(mode);
 
-        // The first present also satisfies the startup watchdog.
         present();
 
         if (m_presented)
@@ -179,9 +189,29 @@ namespace Colibry {
         m_needsRender = true;
     }
 
-    void COutput::present() {
-        if (m_inPresent)
+    void COutput::onFrame() {
+        m_lastFrameEventMs = nowMs();
+        recoverFrame();
+    }
+
+    void COutput::recoverFrame() {
+        if (!m_framePending)
             return;
+
+        m_framePending = false;
+
+        // Frame callbacks fire at presentation time.
+        CCompositor::get().m_display->sendFrameDone((uint32_t)nowMs());
+
+        if (m_needsRender)
+            present();
+    }
+
+    void COutput::present() {
+        if (m_inPresent || m_framePending) {
+            m_needsRender = true;
+            return;
+        }
 
         const auto now = nowMs();
         if (now < m_nextCommitMs) {
@@ -196,8 +226,6 @@ namespace Colibry {
             return;
         }
 
-        // Collect the damage to repaint: everything for a full redraw,
-        // otherwise the merged region accumulated since the last commit.
         Hyprutils::Math::CRegion damage;
         if (m_fullRedraw) {
             damage.add(Hyprutils::Math::CBox({0, 0}, m_pixelSize));
@@ -212,7 +240,6 @@ namespace Colibry {
             damage.add(Hyprutils::Math::CBox({0, 0}, m_pixelSize));
         }
 
-        // Interactive overlays repaint continuously while active.
         if (CSwitcher::get().active() || CDragManager::get().active())
             damage.add(Hyprutils::Math::CBox({0, 0}, m_pixelSize));
 
@@ -225,14 +252,16 @@ namespace Colibry {
         }
 
         if (!CGLCompositor::get().renderFrame(m_buffer, damage)) {
+            // Render failed: the damage stays unconsumed so the next
+            // attempt repaints the same region (no trails).
+            if (!m_fullRedraw)
+                readdDamage(damage);
             m_nextCommitMs = now + COMMIT_BACKOFF_MS;
             m_needsRender  = true;
             m_inPresent    = false;
             return;
         }
 
-        // The frame consumed every surface's damage; the renderer may keep
-        // their textures untouched until the next commit.
         for (const auto& window : CCompositor::get().m_windows) {
             if (window->surface())
                 window->surface()->clearDamage();
@@ -242,25 +271,30 @@ namespace Colibry {
         m_output->state->setBuffer(m_buffer);
 
         if (!m_output->commit()) {
+            // Rejected: a page-flip is still pending. The damage goes back
+            // so a deferred commit never drops a region; completion re-arms
+            // presentation through recoverFrame().
+            if (!m_fullRedraw)
+                readdDamage(damage);
             m_nextCommitMs = now + COMMIT_BACKOFF_MS;
             if (m_failures < 5)
-                std::fprintf(stderr, "[colibry] frame commit failed for %s\n", m_output->name.c_str());
+                std::fprintf(stderr, "[colibry-shell] frame commit deferred for %s (flip pending)\n", m_output->name.c_str());
             ++m_failures;
             m_needsRender = true;
             m_inPresent   = false;
             return;
         }
 
+        m_framePending = true;
+        m_lastCommitMs = now;
+
         m_fullRedraw   = false;
         m_nextCommitMs = now + COMMIT_INTERVAL_MS;
-        m_lastCommitMs = now;
         m_failures     = 0;
 
         m_needsRender = false;
         m_presented   = true;
         m_inPresent   = false;
-
-        CCompositor::get().m_display->sendFrameDone((uint32_t)now);
     }
 
 }

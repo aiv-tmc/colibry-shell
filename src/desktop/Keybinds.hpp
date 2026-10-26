@@ -13,7 +13,7 @@
 #include <vector>
 #include <xkbcommon/xkbcommon.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // Modifier bits used by bind descriptions.
     enum eModMask {

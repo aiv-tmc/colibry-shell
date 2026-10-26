@@ -4,7 +4,7 @@
 
 #include <wayland-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     void CRegionResource::create(wl_client* client, wl_resource* /*compositor*/, uint32_t id) {
         const auto resource = wl_resource_create(client, &wl_region_interface, 1, id);

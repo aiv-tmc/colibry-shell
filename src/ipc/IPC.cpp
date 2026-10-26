@@ -18,9 +18,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
-    static constexpr const char* SOCKET_NAME = "colibry.sock";
+    static constexpr const char* SOCKET_NAME = "colibry-shell.sock";
 
     CIPC::~CIPC() {
         if (m_socketFD >= 0)
@@ -30,13 +30,13 @@ namespace Colibry {
     bool CIPC::start(CEventLoop& loop) {
         const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR");
         if (!runtimeDir || !*runtimeDir) {
-            std::fprintf(stderr, "[colibry] IPC: XDG_RUNTIME_DIR is not set\n");
+            std::fprintf(stderr, "[colibry-shell] IPC: XDG_RUNTIME_DIR is not set\n");
             return false;
         }
 
         m_socketFD = socket(AF_UNIX, SOCK_STREAM, 0);
         if (m_socketFD < 0) {
-            std::fprintf(stderr, "[colibry] IPC: socket failed: %s\n", std::strerror(errno));
+            std::fprintf(stderr, "[colibry-shell] IPC: socket failed: %s\n", std::strerror(errno));
             return false;
         }
 
@@ -51,14 +51,14 @@ namespace Colibry {
         std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
 
         if (bind(m_socketFD, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-            std::fprintf(stderr, "[colibry] IPC: bind failed: %s\n", std::strerror(errno));
+            std::fprintf(stderr, "[colibry-shell] IPC: bind failed: %s\n", std::strerror(errno));
             close(m_socketFD);
             m_socketFD = -1;
             return false;
         }
 
         if (listen(m_socketFD, 4) != 0) {
-            std::fprintf(stderr, "[colibry] IPC: listen failed: %s\n", std::strerror(errno));
+            std::fprintf(stderr, "[colibry-shell] IPC: listen failed: %s\n", std::strerror(errno));
             close(m_socketFD);
             m_socketFD = -1;
             return false;
@@ -68,7 +68,7 @@ namespace Colibry {
 
         loop.addFD(m_socketFD, POLLIN, [this](short) { onAccept(); });
 
-        std::fprintf(stderr, "[colibry] IPC socket: %s\n", path.c_str());
+        std::fprintf(stderr, "[colibry-shell] IPC socket: %s\n", path.c_str());
         return true;
     }
 
@@ -99,7 +99,7 @@ namespace Colibry {
 
         // "version" reports the compositor build version.
         if (request == "version")
-            return std::string(COLIBRY_VERSION) + "\n";
+            return std::string(COLIBRYSHELL_VERSION) + "\n";
 
         // "exit" asks the compositor to leave the event loop.
         if (request == "exit") {

@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace ChromeGeom {
 
         // Semantic hit codes. Button codes are plain values; resize hits

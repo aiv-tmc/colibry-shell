@@ -21,7 +21,7 @@
 // so it is declared here explicitly with C linkage.
 extern "C" int wl_display_get_fd(struct wl_display* display);
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CSurface;
 

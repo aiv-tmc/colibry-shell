@@ -11,7 +11,7 @@
 
 #include <wayland-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CDataDeviceManager& CDataDeviceManager::get() {
         static CDataDeviceManager s_instance;
@@ -23,7 +23,7 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &wl_data_device_manager_interface, 3, this, &CDataDeviceManager::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create wl_data_device_manager global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_data_device_manager global\n");
             return false;
         }
 
@@ -213,7 +213,7 @@ namespace Colibry {
         }
 
         if (source)
-            std::fprintf(stderr, "[colibry] selection set (%zu mime types)\n", source->mimes.size());
+            std::fprintf(stderr, "[colibry-shell] selection set (%zu mime types)\n", source->mimes.size());
     }
 
     void CDataDeviceManager::destroySelectionOffers() {

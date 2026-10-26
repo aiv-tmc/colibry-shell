@@ -11,7 +11,7 @@
 
 #include <wlr-foreign-toplevel-management-unstable-v1-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CForeignToplevelManager& CForeignToplevelManager::get() {
         static CForeignToplevelManager s_instance;
@@ -24,7 +24,7 @@ namespace Colibry {
         m_global = wl_global_create(display->waylandDisplay(), &zwlr_foreign_toplevel_manager_v1_interface, 3, this,
                                     &CForeignToplevelManager::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create the foreign toplevel manager global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the foreign toplevel manager global\n");
             return false;
         }
 

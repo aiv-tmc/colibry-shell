@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CCursor {
       public:

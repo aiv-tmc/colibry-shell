@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     struct SLauncherEntry {
         std::string name;

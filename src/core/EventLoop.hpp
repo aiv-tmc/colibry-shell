@@ -6,7 +6,7 @@
 #include <functional>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     struct SLoopFD {
         int fd;

@@ -14,7 +14,7 @@
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Vector2D.hpp>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CWindow;
 

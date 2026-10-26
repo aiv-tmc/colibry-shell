@@ -14,7 +14,7 @@
 
 namespace Aquamarine { class IBuffer; }
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CGLEngine;
 

@@ -10,7 +10,7 @@
 
 #include <wayland-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     CSubcompositor& CSubcompositor::get() {
         static CSubcompositor s_instance;
@@ -22,7 +22,7 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &wl_subcompositor_interface, 1, this, &CSubcompositor::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create wl_subcompositor global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create wl_subcompositor global\n");
             return false;
         }
 
@@ -30,7 +30,7 @@ namespace Colibry {
     }
 
     void CSubcompositor::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
-        std::fprintf(stderr, "[colibry] client bound wl_subcompositor\n");
+        std::fprintf(stderr, "[colibry-shell] client bound wl_subcompositor\n");
 
         const auto resource = wl_resource_create(client, &wl_subcompositor_interface, version, id);
         if (!resource) {

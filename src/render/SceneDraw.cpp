@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace SceneDraw {
 
         namespace {

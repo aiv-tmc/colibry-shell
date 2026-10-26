@@ -19,7 +19,7 @@ static std::string socketPath() {
     if (!runtimeDir || !*runtimeDir)
         runtimeDir = "/tmp";
 
-    return std::string(runtimeDir) + "/colibry.sock";
+    return std::string(runtimeDir) + "/colibry-shell.sock";
 }
 
 int main(int argc, char** argv) {

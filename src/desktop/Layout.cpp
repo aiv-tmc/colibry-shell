@@ -9,7 +9,7 @@
 
 #include <xdg-shell-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace Layout {
 
         void applyTiling() {

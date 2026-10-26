@@ -12,7 +12,7 @@
 #include <cstring>
 #include <filesystem>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace TitleText {
 
         namespace {
@@ -125,11 +125,11 @@ namespace Colibry {
             }
 
             if (fontPath.empty() || FT_New_Face(s_library, fontPath.c_str(), 0, &s_face) != 0) {
-                std::fprintf(stderr, "[colibry] no titlebar font found\n");
+                std::fprintf(stderr, "[colibry-shell] no titlebar font found\n");
                 return false;
             }
 
-            std::fprintf(stderr, "[colibry] titlebar font: %s\n", fontPath.c_str());
+            std::fprintf(stderr, "[colibry-shell] titlebar font: %s\n", fontPath.c_str());
             return true;
         }
 

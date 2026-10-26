@@ -20,7 +20,7 @@
 #include <map>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CSurface;
 

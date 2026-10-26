@@ -12,7 +12,7 @@
 
 #include <GLES2/gl2.h>
 
-namespace Colibry {
+namespace ColibryShell {
     namespace Draw {
 
         // Draws a textured quad with optional signed-distance rounded corners.

@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // How the wallpaper is mapped onto the output.
     enum eWallpaperFit {

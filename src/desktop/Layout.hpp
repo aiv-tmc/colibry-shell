@@ -7,7 +7,7 @@
 
 #pragma once
 
-namespace Colibry {
+namespace ColibryShell {
     namespace Layout {
 
         // Recomputes positions and configures the sizes of tiled windows on

@@ -12,7 +12,7 @@
 #include <jpeglib.h>
 #include <png.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     static constexpr uint32_t CLEAR_COLOR = 0xFF000000;
 
@@ -142,12 +142,12 @@ namespace Colibry {
 
             ok = isPng(path) ? decodePng(path, m_rgba, m_size) : decodeJpeg(path, m_rgba, m_size);
             if (ok) {
-                std::fprintf(stderr, "[colibry] wallpaper loaded: %s (%dx%d)\n", path.c_str(), (int)m_size.x, (int)m_size.y);
+                std::fprintf(stderr, "[colibry-shell] wallpaper loaded: %s (%dx%d)\n", path.c_str(), (int)m_size.x, (int)m_size.y);
                 return;
             }
         }
 
-        std::fprintf(stderr, "[colibry] failed to load wallpaper '%s'\n", configuredPath.c_str());
+        std::fprintf(stderr, "[colibry-shell] failed to load wallpaper '%s'\n", configuredPath.c_str());
         m_rgba.clear();
         m_size = {0, 0};
     }

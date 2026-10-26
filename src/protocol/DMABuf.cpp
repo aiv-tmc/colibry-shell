@@ -10,7 +10,7 @@
 #include <drm_fourcc.h>
 #include <linux-dmabuf-unstable-v1-server-protocol.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     // Accumulated state of one in-flight zwp_linux_buffer_params object.
     struct SParams {
@@ -41,7 +41,7 @@ namespace Colibry {
 
         m_global = wl_global_create(display->waylandDisplay(), &zwp_linux_dmabuf_v1_interface, 3, this, &CDMABufManager::bind);
         if (!m_global) {
-            std::fprintf(stderr, "[colibry] failed to create the linux-dmabuf global\n");
+            std::fprintf(stderr, "[colibry-shell] failed to create the linux-dmabuf global\n");
             return false;
         }
 
@@ -62,14 +62,18 @@ namespace Colibry {
 
         wl_resource_set_implementation(resource, &IMPLEMENTATION, data, nullptr);
 
-        // Advertise the two formats the renderer imports, with the linear
-        // modifier; Mesa allocates matching buffers then.
+        // Advertise the two formats the renderer imports, each with the
+        // explicit linear modifier and the implicit-modifier wildcard
+        // (DRM_FORMAT_MOD_INVALID); Mesa refuses to allocate otherwise on
+        // most hardware.
         zwp_linux_dmabuf_v1_send_format(resource, DRM_FORMAT_ARGB8888);
         zwp_linux_dmabuf_v1_send_format(resource, DRM_FORMAT_XRGB8888);
 
         if (version >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION) {
             zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_ARGB8888, 0, 0);
             zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_XRGB8888, 0, 0);
+            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_ARGB8888, 0xFFFFFFFF, 0xFFFFFFFF);
+            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_XRGB8888, 0xFFFFFFFF, 0xFFFFFFFF);
         }
     }
 

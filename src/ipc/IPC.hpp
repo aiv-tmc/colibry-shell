@@ -1,6 +1,6 @@
 // Control socket for the Colibry compositor.
 //
-// CIPC listens on $XDG_RUNTIME_DIR/colibry.sock and answers one-line
+// CIPC listens on $XDG_RUNTIME_DIR/colibry-shell.sock and answers one-line
 // requests from the colibryctl utility: version, exit and runtime
 // wallpaper swaps.
 
@@ -10,7 +10,7 @@
 
 #include <string>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CIPC {
       public:

@@ -12,7 +12,7 @@
 
 #include <wayland-server.h>
 
-namespace Colibry {
+namespace ColibryShell {
 
     class CDisplay;
     class CSurface;
