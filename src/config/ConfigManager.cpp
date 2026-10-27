@@ -71,10 +71,13 @@ namespace ColibryShell {
         if (home)
             found |= loadFile(std::string(home) + "/.config/colibry/colibry.toml");
 
-        // Running uninstalled from a repo checkout: a config next to the
-        // working directory applies on top of nothing else.
         if (!found)
             found |= loadFile("colibry.toml");
+        if (!found)
+            found |= loadFile("../colibry.toml");
+
+        if (!found)
+            std::fprintf(stderr, "[colibry-shell] config: no config file found, using defaults\n");
 
         if (m_wallpaperPath.empty()) {
             for (const auto& candidate : {"/usr/local/share/colibry-shell/wallpapers/wallpaper.jpg",
@@ -82,7 +85,9 @@ namespace ColibryShell {
                                           "/usr/local/share/colibry-shell/wallpapers/wallpaper.png",
                                           "/usr/share/colibry-shell/wallpapers/wallpaper.png",
                                           "assets/wallpaper.jpg",
-                                          "assets/wallpaper.png"}) {
+                                          "../assets/wallpaper.jpg",
+                                          "assets/wallpaper.png",
+                                          "../assets/wallpaper.png"}) {
                 std::error_code ec;
                 if (std::filesystem::exists(candidate, ec)) {
                     m_wallpaperPath = candidate;
@@ -95,6 +100,11 @@ namespace ColibryShell {
             std::fprintf(stderr, "[colibry-shell] config: no wallpaper found, using the solid background\n");
         else
             std::fprintf(stderr, "[colibry-shell] config: wallpaper = %s\n", m_wallpaperPath.c_str());
+
+        std::fprintf(stderr, "[colibry-shell] config: cursor size=%d speed=%.2f accel=%.2f color='%s'\n", m_cursorSize, m_cursorSpeed,
+                     m_cursorAcceleration, m_cursorColor.c_str());
+        std::fprintf(stderr, "[colibry-shell] config: rounding window=%d screen=%d, login fade=%dms unlock=%dms, hdr=%d, dmabuf=%d\n", m_windowRounding,
+                     m_screenRounding, m_loginFadeMs, m_loginUnlockMs, (int)m_hdrEnabled, m_dmabufMode);
 
         return found;
     }
@@ -134,27 +144,31 @@ namespace ColibryShell {
     void CConfigManager::applyKey(const std::string& section, const std::string& key, const std::string& rawValue) {
         const std::string k = section.empty() ? key : section + "_" + key;
 
-        if (k == "wallpaper") {
+        if (k == "wallpaper" || k == "wallpaper_path") {
             m_wallpaperPath = unquote(rawValue);
             return;
         }
-        if (k == "wallpaper_fit" || k == "wallpaper_path") {
-            if (k == "wallpaper_path")
-                m_wallpaperPath = unquote(rawValue);
-            else
-                m_wallpaperFit = unquote(rawValue);
+        if (k == "wallpaper_fit") {
+            m_wallpaperFit = unquote(rawValue);
             return;
         }
-        if (k == "cursor_theme") {
-            m_cursorTheme = unquote(rawValue);
+        if (k == "cursor_theme" || k == "cursor_color") {
+            // The theme key is kept for compatibility; a "#RRGGBB" value
+            // tints the procedural arrow, anything else keeps the classic
+            // white.
+            m_cursorColor = unquote(rawValue);
             return;
         }
         if (k == "cursor_size") {
-            m_cursorSize = toInt(rawValue, 24);
+            m_cursorSize = std::clamp(toInt(rawValue, 24), 8, 96);
             return;
         }
         if (k == "cursor_speed") {
             m_cursorSpeed = toDouble(rawValue, 1.0);
+            return;
+        }
+        if (k == "cursor_acceleration") {
+            m_cursorAcceleration = std::clamp(toDouble(rawValue, 0.4), 0.0, 2.0);
             return;
         }
         if (k == "input_follow_mouse") {
@@ -221,6 +235,10 @@ namespace ColibryShell {
             m_hdrEnabled = toInt(rawValue, 1) != 0;
             return;
         }
+        if (k == "render_dmabuf" || k == "dmabuf") {
+            m_dmabufMode = toInt(rawValue, -1);
+            return;
+        }
         if (k == "terminal" || k == "shell_terminal") {
             m_terminal = unquote(rawValue);
             return;
@@ -255,9 +273,10 @@ namespace ColibryShell {
     const std::string& CConfigManager::wallpaperPath() const { return m_wallpaperPath; }
     const std::string& CConfigManager::wallpaperFit() const { return m_wallpaperFit; }
 
-    const std::string& CConfigManager::cursorTheme() const { return m_cursorTheme; }
     int                CConfigManager::cursorSize() const { return m_cursorSize; }
     double             CConfigManager::cursorSpeed() const { return m_cursorSpeed; }
+    double             CConfigManager::cursorAcceleration() const { return m_cursorAcceleration; }
+    const std::string& CConfigManager::cursorColor() const { return m_cursorColor; }
 
     bool CConfigManager::followMouse() const { return m_followMouse; }
 
@@ -279,6 +298,7 @@ namespace ColibryShell {
     int      CConfigManager::loginUnlockMs() const { return m_loginUnlockMs; }
 
     bool CConfigManager::hdrEnabled() const { return m_hdrEnabled; }
+    int  CConfigManager::dmabufMode() const { return m_dmabufMode; }
 
     const std::string& CConfigManager::terminal() const { return m_terminal; }
 

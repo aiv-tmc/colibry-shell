@@ -8,6 +8,7 @@
 #include "../desktop/Switcher.hpp"
 #include "../desktop/Window.hpp"
 #include "../protocol/Buffer.hpp"
+#include "../protocol/DMABuf.hpp"
 #include "../protocol/Surface.hpp"
 #include "Draw.hpp"
 #include "LauncherDraw.hpp"
@@ -17,6 +18,7 @@
 #include <GLES2/gl2.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <pixman.h>
 
@@ -26,8 +28,6 @@ namespace ColibryShell {
 
     static constexpr int32_t MAX_TEXTURE_DIM = 16384;
 
-    // Mesa clients routinely produce the BGR little-endian variants; all
-    // four 32-bit formats the renderer can sample are accepted.
     static bool dmaImportable(const SSurfaceDMA& dma) {
         if (!dma.valid || dma.fd < 0 || dma.stride == 0)
             return false;
@@ -40,6 +40,13 @@ namespace ColibryShell {
             case DRM_FORMAT_ABGR8888:
             case DRM_FORMAT_XBGR8888: return true;
             default: return false;
+        }
+    }
+
+    static void autoDisableDMA(const char* reason) {
+        if (CConfigManager::get().dmabufMode() == -1) {
+            std::fprintf(stderr, "[colibry-shell] dma problem (%s), clients will migrate to wl_shm\n", reason);
+            CDMABufManager::get().disable();
         }
     }
 
@@ -99,33 +106,45 @@ namespace ColibryShell {
             entry.tex = m_engine.createTexture();
 
         const auto& dma = surface->currentDMA();
-        if (dma.valid) {
-            if (!dmaImportable(dma)) {
-                static CSurface* s_loggedSurface = nullptr;
-                if (s_loggedSurface != surface) {
-                    s_loggedSurface = surface;
-                    std::fprintf(stderr, "[colibry-shell] surface content rejected: dma fourcc=0x%x %ux%u stride=%u modifier=0x%lx\n", dma.format, dma.width,
-                                 dma.height, dma.stride, (unsigned long)dma.modifier);
-                }
-                return false;
-            }
 
-            if (!m_engine.importDMA(dma, entry.tex)) {
+        // The dma attributes can be unreadable garbage for shm buffers on
+        // some protocol paths; only a structurally valid, importable dma
+        // takes the zero-copy route. Anything else falls through to the
+        // shared-memory buffer, which is always present for shm clients.
+        if (dma.valid && dmaImportable(dma)) {
+            const auto start = std::chrono::steady_clock::now();
+            const bool ok    = m_engine.importDMA(dma, entry.tex);
+            const auto elapsedMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+            if (!ok) {
                 static CSurface* s_loggedImport = nullptr;
                 if (s_loggedImport != surface) {
                     s_loggedImport = surface;
-                    std::fprintf(stderr, "[colibry-shell] dma import failed for surface (fourcc=0x%x modifier=0x%lx)\n", dma.format,
+                    std::fprintf(stderr, "[colibry-shell] dma import failed (fourcc=0x%x modifier=0x%lx), using shm\n", dma.format,
                                  (unsigned long)dma.modifier);
                 }
-                return false;
-            }
+                autoDisableDMA("eglCreateImageKHR failed");
+                // Fall through to the shm buffer below.
+            } else {
+                if (elapsedMs > 100) {
+                    std::fprintf(stderr, "[colibry-shell] dma import took %lld ms\n", (long long)elapsedMs);
+                    autoDisableDMA("import blocked excessively");
+                }
 
-            entry.w = (int32_t)dma.width;
-            entry.h = (int32_t)dma.height;
-            tex     = entry.tex;
-            w       = entry.w;
-            h       = entry.h;
-            return true;
+                entry.w = (int32_t)dma.width;
+                entry.h = (int32_t)dma.height;
+                tex     = entry.tex;
+                w       = entry.w;
+                h       = entry.h;
+                return true;
+            }
+        } else if (dma.valid) {
+            static CSurface* s_loggedGarbage = nullptr;
+            if (s_loggedGarbage != surface) {
+                s_loggedGarbage = surface;
+                std::fprintf(stderr, "[colibry-shell] ignoring malformed dma attrs (fourcc=0x%x), using shm\n", dma.format);
+            }
         }
 
         const auto buffer = surface->currentBuffer();
@@ -146,6 +165,12 @@ namespace ColibryShell {
         buffer->retain();
         m_engine.uploadRGBA(entry.tex, reinterpret_cast<const uint32_t*>(buffer->data()), size.x, size.y, buffer->stride() / 4);
         buffer->release();
+
+        static CSurface* s_loggedShm = nullptr;
+        if (s_loggedShm != surface) {
+            s_loggedShm = surface;
+            std::fprintf(stderr, "[colibry-shell] surface content via shm %dx%d\n", (int)size.x, (int)size.y);
+        }
 
         entry.w = size.x;
         entry.h = size.y;

@@ -11,9 +11,10 @@ fit = "cover"        # "cover" fills the screen, "fit" shows the whole image
 
 # Pointer: size and speed are applied exactly as written here.
 [cursor]
-theme = "Adwaita"    # XCursor theme; empty = $XCURSOR_THEME or "default"
-size = 24            # sprite size in pixels
-speed = 1.0          # motion multiplier, 1.0 = raw device deltas
+size = 24            # sprite size in pixels (8..96)
+speed = 0.6          # linear multiplier, 1.0 = raw deltas
+acceleration = 0.4   # 0 = off, up to 2.0; boosts fast flicks
+color = ""           # "" = white arrow, "#RRGGBB" tints the fill
 
 # Focus model.
 [input]
@@ -54,6 +55,9 @@ unlock_ms = 250      # input stays locked this long after start
 # HDR10 metadata on HDR-capable panels.
 [hdr]
 enabled = 1          # 1 = attach metadata when the panel reports HDR
+
+[render]
+dmabuf = -1
 
 # Monitor rules: "name,resolution,scale"; empty name matches every output.
 monitors = []

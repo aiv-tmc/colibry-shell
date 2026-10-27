@@ -1,19 +1,19 @@
 // Pointer sprite, motion physics and loss detection for the ColibryShell
 // compositor.
 //
-// Behaviour:
-// - Size and speed come strictly from the configuration; the theme chain
-//   resolves the requested texture with solid fallbacks.
-// - The whole sprite (not just its anchor) is kept inside the screen, so
-//   the cursor can never park itself half off the edge.
-// - Motion is physical: exponential smoothing with velocity extrapolation
-//   and a tilt proportional to horizontal speed, eased like weight.
-// - Cursor loss is detected from behaviour, not time: while searching,
-//   users sweep long erratic paths with frequent direction reversals.
-//   A short sliding window of movement samples scores that pattern; on a
-//   hit the cursor plays a brief pulse (scale spring up and back) to
-//   reveal itself. Fast purposeful movement (gaming) does not trigger it
-//   because its direction changes are rare.
+// The sprite is procedural: a classic arrow with a dark outline, rendered
+// at 4x and box-filtered down, in a config-chosen color. No theme files
+// are involved, so size, color and opacity are exact.
+//
+// Motion is physical: exponential smoothing with velocity extrapolation,
+// speed and acceleration from the configuration, and a tilt proportional
+// to horizontal velocity eased like weight. The whole sprite (not just
+// its anchor) is kept inside the screen.
+//
+// Cursor loss is detected from behaviour: searching users sweep long
+// erratic paths with frequent direction reversals; a sliding window of
+// samples scores that pattern and triggers a brief reveal pulse. Fast
+// purposeful movement does not trigger it.
 
 #pragma once
 
@@ -32,8 +32,10 @@ namespace ColibryShell {
         CCursor()          = default;
         ~CCursor()         = default;
 
-        void load(const std::string& theme, int size);
+        // colorHex is "#RRGGBB" or empty for the classic white arrow.
+        void load(const std::string& colorHex, int size);
         void setSpeed(double speed);
+        void setAcceleration(double acceleration);
 
         Hyprutils::Math::Vector2D position() const;
         Hyprutils::Math::Vector2D renderPosition() const;
@@ -63,7 +65,7 @@ namespace ColibryShell {
             uint64_t                  timeMs;
         };
 
-        static constexpr double MOVE_EASE = 0.24;
+        static constexpr double MOVE_EASE = 0.26;
         static constexpr double REST_EASE = 0.18;
 
         static constexpr uint64_t IDLE_HIDE_MS  = 3000;
@@ -72,24 +74,23 @@ namespace ColibryShell {
         static constexpr double   SHOW_EASE     = 0.34;
 
         static constexpr double EXTRAPOLATE_FRACTION = 0.35;
-        static constexpr double EXTRAPOLATE_MAX_PX   = 2.0;
 
-        static constexpr double TILT_MAX_DEG = 16.0;
-        static constexpr double TILT_SPEED   = 0.45;
+        static constexpr double TILT_MAX_DEG = 12.0;
+        static constexpr double TILT_SPEED   = 0.8;
 
-        // Loss detection window and thresholds.
-        static constexpr uint64_t LOSS_WINDOW_MS       = 1200;
-        static constexpr int      LOSS_MIN_SAMPLES     = 8;
-        static constexpr int      LOSS_MIN_REVERSALS   = 5;
-        static constexpr double   LOSS_MIN_PATH_FRAC   = 0.5;
-        static constexpr double   LOSS_MIN_COVERAGE    = 0.25;
-        static constexpr uint64_t LOSS_COOLDOWN_MS     = 4000;
-        static constexpr double   PULSE_SCALE          = 0.7;
-        static constexpr uint64_t PULSE_DECAY_MS       = 700;
+        static constexpr uint64_t LOSS_WINDOW_MS      = 1200;
+        static constexpr int      LOSS_MIN_SAMPLES    = 8;
+        static constexpr int      LOSS_MIN_REVERSALS  = 5;
+        static constexpr double   LOSS_MIN_PATH_FRAC  = 0.5;
+        static constexpr double   LOSS_MIN_COVERAGE   = 0.25;
+        static constexpr uint64_t LOSS_COOLDOWN_MS    = 4000;
+        static constexpr double   PULSE_SCALE         = 0.7;
+        static constexpr uint64_t PULSE_DECAY_MS      = 700;
 
         Hyprutils::Math::Vector2D clampAnchor(Hyprutils::Math::Vector2D pos) const;
         void                      feedSample(uint64_t nowMs);
         void                      analyzeLoss(uint64_t nowMs);
+        double                    effectiveScale() const;
 
         std::vector<uint32_t>     m_pixels;
         Hyprutils::Math::Vector2D m_size;
@@ -97,6 +98,7 @@ namespace ColibryShell {
         Hyprutils::Math::Vector2D m_bounds = {1920, 1080};
         double                    m_cornerRadius = 0.0;
         double                    m_speed        = 1.0;
+        double                    m_acceleration = 0.4;
 
         Hyprutils::Math::Vector2D m_position;
         Hyprutils::Math::Vector2D m_renderPosition;
@@ -111,11 +113,10 @@ namespace ColibryShell {
         double m_visScale = 1.0;
         double m_visAlpha = 1.0;
 
-        // Behavioural loss detection state.
         std::deque<SSample> m_samples;
-        uint64_t            m_lastSampleMoveMs = 0;
-        double              m_pulse            = 0.0;
-        uint64_t            m_pulseStartMs     = 0;
+        uint64_t            m_lastSampleMoveMs  = 0;
+        double              m_pulse             = 0.0;
+        uint64_t            m_pulseStartMs      = 0;
         uint64_t            m_lossCooldownUntil = 0;
     };
 

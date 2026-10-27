@@ -45,17 +45,13 @@ namespace ColibryShell {
     static constexpr uint64_t FRAME_INTERVAL_MS = 4;
     static constexpr int      MAX_WORKSPACE     = 10;
 
-    // First safety-net grace, then backoff doubles on every net fired in a
-    // row while frame events are missing (starvation detector in the tick).
     static constexpr uint64_t FRAME_COMPLETION_MS = 150;
 
     static uint64_t s_lastTickMs = 0;
 
-    // Starvation state: consecutive timer-driven completions without a
-    // real frame event between them.
-    static uint64_t s_starvations      = 0;
-    static uint64_t s_lastFrameEvents  = 0;
-    static uint64_t s_safetyBackoffMs  = FRAME_COMPLETION_MS;
+    static uint64_t s_starvations     = 0;
+    static uint64_t s_lastFrameEvents = 0;
+    static uint64_t s_safetyBackoffMs = FRAME_COMPLETION_MS;
 
     static volatile sig_atomic_t g_framePresented = 0;
 
@@ -170,6 +166,7 @@ namespace ColibryShell {
     }
 
     bool CCompositor::init() {
+        std::fprintf(stderr, "[colibry-shell] build %s %s\n", __DATE__, __TIME__);
         std::fprintf(stderr, "[colibry-shell] starting compositor %s\n", COLIBRYSHELL_VERSION);
 
         std::signal(SIGALRM, watchdogHandler);
@@ -189,8 +186,9 @@ namespace ColibryShell {
             m_wallpaper->load(m_config->wallpaperPath());
 
         m_cursor = Hyprutils::Memory::makeShared<CCursor>();
-        m_cursor->load(m_config->cursorTheme(), m_config->cursorSize());
+        m_cursor->load(m_config->cursorColor(), m_config->cursorSize());
         m_cursor->setSpeed(m_config->cursorSpeed());
+        m_cursor->setAcceleration(m_config->cursorAcceleration());
         m_cursor->setCornerRadius(m_config->screenRounding());
 
         m_display = Hyprutils::Memory::makeShared<CDisplay>();
@@ -318,18 +316,13 @@ namespace ColibryShell {
                 self.removeWindow(window);
 
             for (const auto& output : self.m_outputs) {
-                // Starvation tracking: a timer completion that fires while
-                // the backend's frame-event counter has not advanced means
-                // events stopped flowing; back off exponentially instead of
-                // hammering the GPU with frames that get rejected.
                 const uint64_t events = output->frameEvents();
                 if (output->framePending() && now - output->lastCommitMs() > s_safetyBackoffMs) {
                     ++s_starvations;
-                    if (events == s_lastFrameEvents) {
+                    if (events == s_lastFrameEvents)
                         s_safetyBackoffMs = std::min<uint64_t>(s_safetyBackoffMs * 2, 2000);
-                    } else {
+                    else
                         s_safetyBackoffMs = FRAME_COMPLETION_MS;
-                    }
                     output->recoverFrame();
                 }
                 s_lastFrameEvents = events;
@@ -344,8 +337,6 @@ namespace ColibryShell {
 
             const auto now = nowMs();
             for (const auto& output : self.m_outputs) {
-                // Liveness telemetry: whichever counter stops advancing in
-                // the last line before a freeze names the wedged stage.
                 std::fprintf(stderr,
                              "[colibry-shell] alive: commit=%llums frames=%llu nets=%llu reject=%llu pending=%d windows=%zu cursor=%.0f,%.0f\n",
                              (unsigned long long)(now - output->lastCommitMs()), (unsigned long long)output->frameEvents(),
@@ -480,6 +471,9 @@ namespace ColibryShell {
     }
 
     void CCompositor::focusWindow(CWindow* window) {
+        if (m_shutdown)
+            window = nullptr;
+
         if (m_focusedWindow == window) {
             if (window)
                 raise(window, true);
@@ -495,10 +489,11 @@ namespace ColibryShell {
             raise(window, true);
             m_seat->setKeyboardFocus(window->surface());
             addDamage(windowBox(window));
-        } else
+        } else if (!m_shutdown)
             m_seat->setKeyboardFocus(nullptr);
 
-        refreshForeignToplevel();
+        if (!m_shutdown)
+            refreshForeignToplevel();
         requestRender();
     }
 
@@ -564,10 +559,15 @@ namespace ColibryShell {
                     return;
                 }
             }
-            m_seat->setKeyboardFocus(nullptr);
+
+            // During teardown the seat's client resources are already
+            // gone; touching them segfaults inside wl_display_destroy_clients.
+            if (!m_shutdown)
+                m_seat->setKeyboardFocus(nullptr);
         }
 
-        refreshForeignToplevel();
+        if (!m_shutdown)
+            refreshForeignToplevel();
         requestRender();
     }
 

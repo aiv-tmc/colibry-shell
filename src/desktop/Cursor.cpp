@@ -1,4 +1,5 @@
-// Implementation of the pointer sprite, motion physics and loss detection.
+// Implementation of the procedural pointer sprite, motion physics and
+// loss detection.
 
 #include "Cursor.hpp"
 
@@ -8,92 +9,92 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <X11/Xcursor/Xcursor.h>
-
 namespace ColibryShell {
 
     static uint64_t nowMs() {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    // Xcursor image sets may carry the cursor together with overlay or
-    // shadow variants; the real sprite is the most opaque image.
-    static XcursorImage* pickSolidImage(XcursorImages* images) {
-        XcursorImage* best      = images->images[0];
-        uint64_t      bestAlpha = 0;
+    // Classic arrow outline at 24x24 design units, hotspot at the tip.
+    static const double ARROW[][2] = {
+        {1, 1}, {1, 20}, {6, 15}, {9, 23}, {12, 21}, {9, 14}, {15, 14},
+    };
+    static constexpr int ARROW_POINTS = 7;
+    static constexpr double ARROW_UNIT = 24.0;
 
-        for (int i = 0; i < images->nimage; ++i) {
-            XcursorImage* image = images->images[i];
-            uint64_t      sum   = 0;
-            for (size_t p = 0; p < (size_t)image->width * image->height; ++p)
-                sum += (image->pixels[p] >> 24) & 0xFF;
+    static bool pointInPolygon(double x, double y, double scale, double inset) {
+        bool inside = false;
+        for (int i = 0, j = ARROW_POINTS - 1; i < ARROW_POINTS; j = i++) {
+            const double xi = ARROW[i][0] * scale + inset, yi = ARROW[i][1] * scale + inset;
+            const double xj = ARROW[j][0] * scale + inset, yj = ARROW[j][1] * scale + inset;
 
-            if (sum > bestAlpha) {
-                bestAlpha = sum;
-                best      = image;
-            }
+            if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+                inside = !inside;
         }
-
-        return best;
+        return inside;
     }
 
-    void CCursor::load(const std::string& themeOverride, int sizeOverride) {
-        // Theme resolution: config value, env override, common fallbacks.
-        std::vector<std::string> themes;
-        if (!themeOverride.empty())
-            themes.push_back(themeOverride);
-        if (const char* env = std::getenv("XCURSOR_THEME"))
-            if (*env)
-                themes.emplace_back(env);
-        themes.insert(themes.end(), {"Adwaita", "breeze_cursors", "Yaru", "default"});
+    static uint32_t parseColor(const std::string& hex) {
+        if (hex.size() == 7 && hex[0] == '#') {
+            const uint32_t v = (uint32_t)std::strtoul(hex.c_str() + 1, nullptr, 16);
+            return 0xFF000000 | v;
+        }
+        return 0xFFFFFFFF; // classic white
+    }
 
-        int size = sizeOverride;
-        if (size <= 0 && std::getenv("XCURSOR_SIZE"))
-            size = std::atoi(std::getenv("XCURSOR_SIZE"));
-        if (size <= 0)
-            size = 24;
+    // Rasterizes the arrow at 4x with a per-pixel polygon test, then box-
+    // filters down: crisp anti-aliased edges with no external assets.
+    static std::vector<uint32_t> buildArrow(int size, uint32_t rgb) {
+        const int    super  = 4;
+        const int    big    = size * super;
+        const double scale  = (double)big / ARROW_UNIT;
+        const double inset  = 1.2 * scale;   // outline thickness in big pixels
 
-        XcursorImages* images    = nullptr;
-        std::string    usedTheme;
+        const uint8_t r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
 
-        for (const auto& theme : themes) {
-            images = XcursorLibraryLoadImages("left_ptr", theme.c_str(), size);
-            if (images && images->nimage >= 1) {
-                usedTheme = theme;
-                break;
-            }
-            if (images) {
-                XcursorImagesDestroy(images);
-                images = nullptr;
-            }
-            images = XcursorLibraryLoadImages("left_ptr", theme.c_str(), 16);
-            if (images && images->nimage >= 1) {
-                usedTheme = theme;
-                break;
-            }
-            if (images) {
-                XcursorImagesDestroy(images);
-                images = nullptr;
+        std::vector<uint32_t> bigPixels((size_t)big * big, 0);
+        for (int y = 0; y < big; ++y) {
+            for (int x = 0; x < big; ++x) {
+                const double px = x + 0.5, py = y + 0.5;
+
+                if (pointInPolygon(px, py, scale, 0.0)) {
+                    uint32_t c = 0xFF000000;
+                    if (pointInPolygon(px, py, scale, inset))
+                        c = 0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+                    bigPixels[(size_t)y * big + x] = c;
+                }
             }
         }
 
-        if (!images || images->nimage < 1) {
-            std::fprintf(stderr, "[colibry-shell] failed to load any cursor theme\n");
-            if (images)
-                XcursorImagesDestroy(images);
-            return;
+        std::vector<uint32_t> out((size_t)size * size, 0);
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                uint32_t rSum = 0, gSum = 0, bSum = 0, aSum = 0;
+                for (int sy = 0; sy < super; ++sy) {
+                    for (int sx = 0; sx < super; ++sx) {
+                        const uint32_t p = bigPixels[(size_t)(y * super + sy) * big + (x * super + sx)];
+                        aSum += (p >> 24) & 0xFF;
+                        rSum += (p >> 16) & 0xFF;
+                        gSum += (p >> 8) & 0xFF;
+                        bSum += p & 0xFF;
+                    }
+                }
+                const int n    = super * super;
+                const uint32_t a = aSum / n;
+                out[(size_t)y * size + x] =
+                    (a << 24) | ((rSum / n) << 16) | ((gSum / n) << 8) | (bSum / n);
+            }
         }
+        return out;
+    }
 
-        XcursorImage* image = pickSolidImage(images);
+    void CCursor::load(const std::string& colorHex, int size) {
+        size = std::clamp(size, 8, 96);
 
-        m_size    = {(int)image->width, (int)image->height};
-        m_hotspot = {(int)image->xhot, (int)image->yhot};
-
-        // Xcursor pixels are premultiplied ARGB, exactly what the GL
-        // pipeline consumes.
-        m_pixels.assign(image->pixels, image->pixels + (size_t)image->width * image->height);
-
-        XcursorImagesDestroy(images);
+        m_pixels = buildArrow(size, parseColor(colorHex));
+        m_size   = {size, size};
+        m_hotspot = {1.0 * size / ARROW_UNIT * 1.0, 1.0 * size / ARROW_UNIT * 1.0};
+        m_hotspot = {std::max(1.0, (double)size / ARROW_UNIT), std::max(1.0, (double)size / ARROW_UNIT)};
 
         m_position       = m_bounds / 2.0;
         m_renderPosition = m_position;
@@ -101,11 +102,18 @@ namespace ColibryShell {
         m_tilt           = 0.0;
         m_renderValid    = false;
         m_lastMoveMs     = nowMs();
+        m_samples.clear();
 
-        std::fprintf(stderr, "[colibry-shell] cursor: %s %dx%d\n", usedTheme.c_str(), (int)m_size.x, (int)m_size.y);
+        std::fprintf(stderr, "[colibry-shell] cursor: procedural arrow %dx%d color='%s'\n", size, size, colorHex.empty() ? "#ffffff" : colorHex.c_str());
     }
 
     void CCursor::setSpeed(double speed) { m_speed = std::clamp(speed, 0.05, 3.0); }
+
+    void CCursor::setAcceleration(double acceleration) { m_acceleration = std::clamp(acceleration, 0.0, 2.0); }
+
+    double CCursor::effectiveScale() const {
+        return std::max(m_visScale, 0.05) * (1.0 + PULSE_SCALE * m_pulse);
+    }
 
     Hyprutils::Math::Vector2D CCursor::position() const { return m_position; }
 
@@ -114,7 +122,7 @@ namespace ColibryShell {
             return m_overridePos;
 
         const double k = std::min(1.0, std::hypot(m_velocity.x, m_velocity.y) / 24.0);
-        return m_renderPosition + m_velocity * (EXTRAPOLATE_FRACTION * k);
+        return m_renderPosition + m_velocity * (0.35 * k);
     }
 
     Hyprutils::Math::Vector2D CCursor::hotspot() const { return m_hotspot * m_visScale; }
@@ -122,7 +130,7 @@ namespace ColibryShell {
     double CCursor::visibilityAlpha() const { return m_visAlpha; }
 
     Hyprutils::Math::CBox CCursor::damageBox() const {
-        const double scale  = std::max(m_visScale, 0.05) * (1.0 + PULSE_SCALE * m_pulse);
+        const double scale  = effectiveScale();
         const double w      = m_size.x * scale;
         const double h      = m_size.y * scale;
         const auto   anchor = renderPosition();
@@ -133,12 +141,12 @@ namespace ColibryShell {
     }
 
     Hyprutils::Math::Vector2D CCursor::clampAnchor(Hyprutils::Math::Vector2D pos) const {
-        // Keep the whole sprite on screen: the anchor may come as close to
-        // each edge as the sprite extends past it, never further.
-        const double scale = std::max(m_visScale, 0.05) * (1.0 + PULSE_SCALE * m_pulse);
-        const double left  = m_hotspot.x * scale;
-        const double right = m_size.x * scale - m_hotspot.x * scale;
-        const double top   = m_hotspot.y * scale;
+        // The whole sprite must stay visible: the anchor can approach each
+        // edge only as far as the sprite extends past it.
+        const double scale  = std::max(m_visScale, 0.05);
+        const double left   = m_hotspot.x * scale;
+        const double right  = m_size.x * scale - m_hotspot.x * scale;
+        const double top    = m_hotspot.y * scale;
         const double bottom = m_size.y * scale - m_hotspot.y * scale;
 
         pos.x = std::clamp(pos.x, left, std::max(left, m_bounds.x - 1.0 - right));
@@ -189,7 +197,12 @@ namespace ColibryShell {
         m_renderValid = false;
     }
 
-    void CCursor::moveBy(Hyprutils::Math::Vector2D delta) { setPosition(m_position + delta * m_speed); }
+    void CCursor::moveBy(Hyprutils::Math::Vector2D delta) {
+        // Config speed, plus a mild acceleration curve so small touchpad
+        // deltas stay precise and fast flicks travel further.
+        const double boost = 1.0 + m_acceleration * std::min(3.0, std::hypot(delta.x, delta.y) / 12.0);
+        setPosition(m_position + delta * (m_speed * boost));
+    }
 
     void CCursor::setRenderOverride(Hyprutils::Math::Vector2D pos) {
         m_override    = true;
@@ -199,8 +212,6 @@ namespace ColibryShell {
     void CCursor::clearRenderOverride() { m_override = false; }
 
     void CCursor::feedSample(uint64_t now) {
-        // Record a sample only on real movement, so pauses naturally age
-        // out of the window.
         if (!m_samples.empty() && std::hypot(m_position.x - m_samples.back().pos.x, m_position.y - m_samples.back().pos.y) < 2.0)
             return;
 
@@ -217,7 +228,7 @@ namespace ColibryShell {
 
         const double diag = std::hypot(m_bounds.x, m_bounds.y);
 
-        double path     = 0.0;
+        double path      = 0.0;
         int    reversals = 0;
         int    lastSignX = 0;
 
@@ -242,12 +253,9 @@ namespace ColibryShell {
 
         const double coverage = (hi.x - lo.x) * (hi.y - lo.y) / std::max(1.0, m_bounds.x * m_bounds.y);
 
-        // Lost-cursor behaviour: long erratic sweeps across a wide area.
-        // Purposeful fast movement has a stable direction and never
-        // reaches the reversal count.
         if (reversals >= LOSS_MIN_REVERSALS && path > LOSS_MIN_PATH_FRAC * diag && coverage > LOSS_MIN_COVERAGE) {
-            m_pulse            = 1.0;
-            m_pulseStartMs     = now;
+            m_pulse             = 1.0;
+            m_pulseStartMs      = now;
             m_lossCooldownUntil = now + LOSS_COOLDOWN_MS;
             m_samples.clear();
         }
@@ -259,7 +267,6 @@ namespace ColibryShell {
         feedSample(now);
         analyzeLoss(now);
 
-        // The reveal pulse decays to zero over PULSE_DECAY_MS.
         if (m_pulse > 0.0) {
             const double t = std::min(1.0, (double)(now - m_pulseStartMs) / (double)PULSE_DECAY_MS);
             m_pulse        = 1.0 - t;
@@ -295,7 +302,7 @@ namespace ColibryShell {
 
         // Lean into horizontal motion, eased like physical weight.
         const double targetTilt = std::clamp(m_velocity.x * TILT_SPEED, -TILT_MAX_DEG, TILT_MAX_DEG);
-        m_tilt                  = m_tilt + (targetTilt - m_tilt) * 0.25;
+        m_tilt                  = m_tilt + (targetTilt - m_tilt) * 0.3;
         if (std::abs(m_tilt) > 0.05)
             animating = true;
 
@@ -318,11 +325,17 @@ namespace ColibryShell {
         if (m_pixels.empty() || m_visAlpha <= 0.01)
             return false;
 
-        const double scale = std::max(m_visScale, 0.05);
+        const double scale = effectiveScale();
         w = std::max(1, (int)std::ceil(m_size.x * scale));
         h = std::max(1, (int)std::ceil(m_size.y * scale));
 
         out.assign((size_t)w * h, 0);
+        static bool s_loggedRaster = false;
+        if (!s_loggedRaster) {
+            s_loggedRaster = true;
+            std::fprintf(stderr, "[colibry-shell] cursor raster: %dx%d alpha=%.2f center=%08x\n", w, h, m_visAlpha,
+                         m_pixels[(size_t)(m_size.y / 2) * (int)m_size.x + (int)(m_size.x / 2)]);
+        }
 
         const double angle = m_tilt * 3.14159265 / 180.0;
         const double cosA  = std::cos(angle);

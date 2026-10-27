@@ -1,9 +1,9 @@
-// linux-dmabuf protocol global for the Colibry compositor.
+// linux-dmabuf protocol global for the ColibryShell compositor.
 //
-// Only what the GPU renderer consumes is implemented: plane 0 of
-// ARGB8888/XRGB8888 buffers with an explicit modifier. Buffer attributes
-// are carried through wl_buffer user data and read by the surface commit
-// path.
+// Plane 0 of the 32-bit RGB formats only. The manager can be disabled at
+// runtime: once disabled, buffer creation requests fail with a protocol
+// error and clients fall back to wl_shm, which this renderer imports
+// through the proven CPU upload path.
 
 #pragma once
 
@@ -13,7 +13,6 @@ namespace ColibryShell {
 
     class CDisplay;
 
-    // Client-visible attributes of a dmabuf-backed wl_buffer.
     struct SDMABufAttrs {
         bool     valid    = false;
         int32_t  fd       = -1;
@@ -29,13 +28,16 @@ namespace ColibryShell {
       public:
         static CDMABufManager& get();
 
-        // Creates the zwp_linux_dmabuf_v1 global.
         bool init(CDisplay* display);
+
+        // Runtime kill switch: after a failed GPU import the renderer
+        // disables the manager so new buffers cannot be created and
+        // clients migrate to wl_shm.
+        void disable();
+        bool disabled() const { return m_disabled; }
 
         static void bind(wl_client* client, void* data, uint32_t version, uint32_t id);
 
-        // Protocol request handlers. Signatures match the generated v1
-        // interface exactly (plane_idx is unsigned, sizes are signed).
         static void destroy(wl_client* client, wl_resource* resource);
         static void createParams(wl_client* client, wl_resource* resource, uint32_t id);
         static void paramsDestroy(wl_client* client, wl_resource* resource);
@@ -52,8 +54,9 @@ namespace ColibryShell {
         CDMABufManager(const CDMABufManager&)            = delete;
         CDMABufManager& operator=(const CDMABufManager&) = delete;
 
-        CDisplay*   m_display = nullptr;
-        wl_global*  m_global  = nullptr;
+        CDisplay* m_display  = nullptr;
+        wl_global* m_global  = nullptr;
+        bool       m_disabled = false;
     };
 
 }

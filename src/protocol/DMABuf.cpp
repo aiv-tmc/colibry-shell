@@ -46,6 +46,13 @@ namespace ColibryShell {
         return true;
     }
 
+    void CDMABufManager::disable() {
+        if (m_disabled)
+            return;
+        m_disabled = true;
+        std::fprintf(stderr, "[colibry-shell] linux-dmabuf disabled, clients will use wl_shm\n");
+    }
+
     void CDMABufManager::bind(wl_client* client, void* data, uint32_t version, uint32_t id) {
         const auto resource = wl_resource_create(client, &zwp_linux_dmabuf_v1_interface, version, id);
         if (!resource) {
@@ -60,9 +67,8 @@ namespace ColibryShell {
 
         wl_resource_set_implementation(resource, &IMPLEMENTATION, data, nullptr);
 
-        // Advertise every format the renderer imports, each with the
-        // explicit linear modifier and the implicit-modifier wildcard, so
-        // Mesa can allocate regardless of its tiling preference.
+        // Advertise every importable format with the explicit linear
+        // modifier and the implicit-modifier wildcard.
         static const uint32_t FORMATS[] = {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888};
 
         for (const uint32_t format : FORMATS) {
@@ -176,6 +182,11 @@ namespace ColibryShell {
                                       uint32_t flags) {
         (void)flags;
 
+        if (get().disabled()) {
+            zwp_linux_buffer_params_v1_send_failed(resource);
+            return;
+        }
+
         const auto buffer = buildBuffer(client, resource, 0, width, height, format);
         if (!buffer) {
             wl_resource_post_error(resource, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE, "buffer creation failed");
@@ -188,6 +199,12 @@ namespace ColibryShell {
     void CDMABufManager::paramsCreateImmed(wl_client* client, wl_resource* resource, uint32_t bufferId, int32_t width, int32_t height,
                                            uint32_t format, uint32_t flags) {
         (void)flags;
+
+        if (get().disabled()) {
+            wl_resource_post_error(resource, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT, "linux-dmabuf is disabled");
+            return;
+        }
+
         buildBuffer(client, resource, bufferId, width, height, format);
     }
 

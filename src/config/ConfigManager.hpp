@@ -1,4 +1,10 @@
 // TOML configuration for the ColibryShell compositor.
+//
+// Search order: /etc/colibry/colibry.toml, then
+// ~/.config/colibry/colibry.toml, then ./colibry.toml and
+// ../colibry.toml (running uninstalled from build/ or the repo root).
+// Later files override earlier ones; unknown keys are ignored. The
+// effective values are echoed to the log after loading.
 
 #pragma once
 
@@ -23,9 +29,10 @@ namespace ColibryShell {
         const std::string& wallpaperPath() const;
         const std::string& wallpaperFit() const;
 
-        const std::string& cursorTheme() const;
         int                cursorSize() const;
         double             cursorSpeed() const;
+        double             cursorAcceleration() const;
+        const std::string& cursorColor() const;
 
         bool followMouse() const;
 
@@ -47,6 +54,7 @@ namespace ColibryShell {
         int      loginUnlockMs() const;
 
         bool hdrEnabled() const;
+        int  dmabufMode() const;
 
         const std::string& terminal() const;
 
@@ -59,9 +67,10 @@ namespace ColibryShell {
 
         std::string m_wallpaperPath;
         std::string m_wallpaperFit = "cover";
-        std::string m_cursorTheme  = "Adwaita";
         int         m_cursorSize   = 24;
         double      m_cursorSpeed  = 1.0;
+        double      m_cursorAcceleration = 0.4;
+        std::string m_cursorColor  = "";   // "" = classic white arrow
         bool        m_followMouse  = true;
 
         bool   m_shadowEnabled  = true;
@@ -82,6 +91,7 @@ namespace ColibryShell {
         int      m_loginUnlockMs  = 250;
 
         bool m_hdrEnabled = true;
+        int  m_dmabufMode = -1;
 
         std::string m_terminal = "ghostty";
 

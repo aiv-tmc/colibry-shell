@@ -3,7 +3,8 @@
 // Byte-order convention: every texture is uploaded from native 32-bit
 // 0xAARRGGBB pixels; GL_RGBA reads them byte-swapped, so the fragment
 // shaders swap the channels back. Blending is premultiplied
-// (GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
+// (GL_ONE, GL_ONE_MINUS_SRC_ALPHA). Positions are desktop pixels with a
+// top-left origin, so gl_FragCoord.y grows downward.
 
 #pragma once
 
@@ -23,10 +24,11 @@ namespace ColibryShell {
                                    "  gl_Position = vec4(ndc.x, ndc.y, 0.0, 1.0);"
                                    "}";
 
-    // Textured quad with signed-distance rounded corners. uRoundTop picks
-    // between rounding all four corners (windows overlay, cards) and only
-    // the bottom two (window content, whose top edge meets the square
-    // bottom of the titlebar so the two read as one surface).
+    // Textured quad with signed-distance rounded corners. uRoundTop = 1
+    // rounds all four corners; uRoundTop = 0 rounds only the bottom two
+    // (window content: its top edge tucks squarely under the titlebar).
+    // Desktop y grows downward, so "bottom half" means the pixels with
+    // the larger gl_FragCoord.y.
     static const char* QUAD_FRAG = "precision mediump float;"
                                    "varying vec2 vUV;"
                                    "uniform sampler2D uTex;"
@@ -50,7 +52,7 @@ namespace ColibryShell {
                                    "  float cov = 1.0;"
                                    "  if (uRadius > 0.5) {"
                                    "    float d = roundedDist(gl_FragCoord.xy - vec2(0.5));"
-                                   "    if (uRoundTop < 0.5 && gl_FragCoord.y > uQuadOrigin.y + uQuadSize.y * 0.5)"
+                                   "    if (uRoundTop < 0.5 && gl_FragCoord.y < uQuadOrigin.y + uQuadSize.y * 0.5)"
                                    "      d = rectDist(gl_FragCoord.xy - vec2(0.5));"
                                    "    cov = clamp(0.5 - d, 0.0, 1.0);"
                                    "  }"
@@ -76,6 +78,9 @@ namespace ColibryShell {
                                     "  gl_FragColor = vec4(uColor.rgb * uColor.a * cov, uColor.a * cov);"
                                     "}";
 
+    // Titlebar gradient derived from the window's top pixels, composited
+    // with the glyph overlay. The top corners (small desktop y) are
+    // rounded, the bottom edge stays square to meet the content.
     static const char* TITLEBAR_FRAG =
         "precision mediump float;"
         "varying vec2 vUV;"
