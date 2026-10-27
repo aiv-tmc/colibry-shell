@@ -23,7 +23,6 @@ namespace ColibryShell {
 
     namespace {
 
-        // Parses a modifier prefix ("SUPER+CTRL+") into the mask.
         uint32_t parseMods(const std::string& keys) {
             uint32_t mods = 0;
 
@@ -42,8 +41,6 @@ namespace ColibryShell {
             return mods;
         }
 
-        // Resolves the terminal command: env override, config, fallback
-        // chain of common terminals.
         std::string resolveTerminal() {
             if (const char* env = std::getenv("COLIBRYSHELL_TERMINAL"))
                 if (*env)
@@ -56,7 +53,6 @@ namespace ColibryShell {
             return "ghostty || foot || kitty || alacritty || xterm || weston-terminal";
         }
 
-        // Spawns a shell command inside the compositor session.
         void spawn(const std::string& command) {
             auto& compositor = CCompositor::get();
             if (!compositor.m_display)
@@ -74,7 +70,6 @@ namespace ColibryShell {
             _exit(1);
         }
 
-        // Rotates the current workspace until it equals the target.
         void switchToWorkspace(int ws) {
             auto& compositor = CCompositor::get();
             while (compositor.m_currentWorkspace != ws) {
@@ -94,8 +89,23 @@ namespace ColibryShell {
                 compositor.moveWindowToWorkspace(compositor.m_focusedWindow, ws);
         }
 
-        // Handles the non-exec bind verbs ("colibry:*", "workspace:*",
-        // "movetoworkspace:*").
+        // Keyboard window management: move and resize the focused window
+        // in fixed steps, fully mouse-free.
+        void moveFocused(int dx, int dy) {
+            auto& compositor = CCompositor::get();
+            if (compositor.m_focusedWindow && !compositor.m_focusedWindow->isFullscreen())
+                compositor.m_focusedWindow->moveBy({(double)dx, (double)dy});
+        }
+
+        void resizeFocused(int dx, int dy) {
+            auto& compositor = CCompositor::get();
+            if (!compositor.m_focusedWindow || compositor.m_focusedWindow->isFullscreen())
+                return;
+
+            const auto size = compositor.m_focusedWindow->size();
+            compositor.m_focusedWindow->resizeTo({size.x + dx, size.y + dy});
+        }
+
         void handleAction(const std::string& action) {
             auto& compositor = CCompositor::get();
 
@@ -163,6 +173,16 @@ namespace ColibryShell {
                 return;
             }
 
+            if (action == "colibry:moveleft") { moveFocused(-40, 0); return; }
+            if (action == "colibry:moveright") { moveFocused(40, 0); return; }
+            if (action == "colibry:moveup") { moveFocused(0, -40); return; }
+            if (action == "colibry:movedown") { moveFocused(0, 40); return; }
+
+            if (action == "colibry:resizeleft") { resizeFocused(-40, 0); return; }
+            if (action == "colibry:resizeright") { resizeFocused(40, 0); return; }
+            if (action == "colibry:resizeup") { resizeFocused(0, -40); return; }
+            if (action == "colibry:resizedown") { resizeFocused(0, 40); return; }
+
             if (action == "colibry:close") {
                 if (compositor.m_focusedWindow)
                     compositor.m_focusedWindow->close();
@@ -190,10 +210,8 @@ namespace ColibryShell {
             }
         }
 
-        // Registers the built-in binds once before any config bind is
-        // added; config binds are appended after and may duplicate them.
         void registerDefaults(CKeybindManager& manager) {
-            static const std::array<std::string, 16> DEFAULTS = {
+            static const std::array<std::string, 24> DEFAULTS = {
                 "SUPER+Return=exec:" + resolveTerminal(),
                 "Alt+F1=exec:" + resolveTerminal(),
                 "SUPER+T=exec:ghostty",
@@ -203,6 +221,14 @@ namespace ColibryShell {
                 "SUPER+Tab=colibry:openswitcher",
                 "SUPER+J=colibry:focusnext",
                 "SUPER+K=colibry:focusprev",
+                "SUPER+Left=colibry:moveleft",
+                "SUPER+Right=colibry:moveright",
+                "SUPER+Up=colibry:moveup",
+                "SUPER+Down=colibry:movedown",
+                "SUPER+Shift+Left=colibry:resizeleft",
+                "SUPER+Shift+Right=colibry:resizeright",
+                "SUPER+Shift+Up=colibry:resizeup",
+                "SUPER+Shift+Down=colibry:resizedown",
                 "SUPER+C=colibry:close",
                 "SUPER+Q=colibry:close",
                 "Alt+F4=colibry:close",
@@ -224,7 +250,6 @@ namespace ColibryShell {
 
     }
 
-    // Defined out of line: the header only declares the constructor.
     CKeybindManager::CKeybindManager() {
         registerDefaults(*this);
     }
@@ -262,7 +287,6 @@ namespace ColibryShell {
     }
 
     bool CKeybindManager::handle(xkb_keysym_t sym, uint32_t mods, bool pressed) {
-        // Keybinds trigger on press only; releases fall through to clients.
         if (!pressed)
             return false;
 

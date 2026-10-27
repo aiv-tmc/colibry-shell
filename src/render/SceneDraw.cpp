@@ -26,6 +26,8 @@ namespace ColibryShell {
 
         namespace {
 
+            static constexpr int32_t MAX_OVERLAY_DIM = 8192;
+
             struct SShadowKey {
                 int32_t w, h, r;
                 bool    operator<(const SShadowKey& o) const {
@@ -44,6 +46,12 @@ namespace ColibryShell {
             std::vector<uint32_t>          s_cursorPixels;
             int32_t                        s_cursorW = 0;
             int32_t                        s_cursorH = 0;
+
+            // Reused mesh buffers: no per-frame allocation while a window
+            // flexes.
+            std::vector<float>   s_meshPositions;
+            std::vector<float>   s_meshUVBar;
+            std::vector<float>   s_meshUVContent;
 
             void drawUnitQuad() {
                 const float verts[] = {0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0};
@@ -68,8 +76,6 @@ namespace ColibryShell {
                 drawUnitQuad();
             }
 
-            // Generates the blurred silhouette for one window size on the
-            // GPU and caches the result.
             uint32_t shadowTexture(CGLEngine& e, int32_t w, int32_t h, int32_t r, double opacity) {
                 const SShadowKey key{w, h, r};
                 const auto       it = s_shadows.find(key);
@@ -101,11 +107,12 @@ namespace ColibryShell {
                 return tex;
             }
 
-            // Uploads the titlebar overlay (title and button glyphs) only
-            // when the title, geometry or hover state changed.
             uint32_t overlayTexture(CGLEngine& e, const CWindow& window, int32_t w, int32_t h) {
                 const int         hover = window.hoveredTitleButton();
                 const std::string& title = window.title();
+
+                w = std::clamp(w, 1, MAX_OVERLAY_DIM);
+                h = std::clamp(h, 1, MAX_OVERLAY_DIM);
 
                 if (!s_overlayTex || s_overlayTitle != title || s_overlayW != w || s_overlayH != h || s_overlayHover != hover) {
                     TitleText::rasterizeOverlay(title, w, h, ChromeGeom::buttonsWidth(), hover, s_overlayPixels);
@@ -120,46 +127,40 @@ namespace ColibryShell {
                 return s_overlayTex;
             }
 
-            // Fills interleaved position and UV float arrays from the cloth
-            // mesh. Titlebar UVs span the bar height; content UVs span the
-            // remaining area, clamped so edge vertices never sample
-            // outside the texture.
-            void fillMeshArrays(const SClothMesh& mesh, const Hyprutils::Math::CBox& box, double barH, std::vector<float>& positions,
-                                std::vector<float>& uvBar, std::vector<float>& uvContent) {
+            void fillMeshArrays(const SClothMesh& mesh, const Hyprutils::Math::CBox& box, double barH) {
                 const double boxH = box.size().y;
                 const double contentH = std::max(1.0, boxH - barH);
 
                 const size_t count = mesh.pos.size();
-                positions.resize(count * 2);
-                uvBar.resize(count * 2);
-                uvContent.resize(count * 2);
+                s_meshPositions.resize(count * 2);
+                s_meshUVBar.resize(count * 2);
+                s_meshUVContent.resize(count * 2);
 
                 for (size_t i = 0; i < count; ++i) {
-                    positions[i * 2]     = (float)mesh.pos[i].x;
-                    positions[i * 2 + 1] = (float)mesh.pos[i].y;
+                    s_meshPositions[i * 2]     = (float)mesh.pos[i].x;
+                    s_meshPositions[i * 2 + 1] = (float)mesh.pos[i].y;
 
                     const double u = mesh.fx[i];
-                    uvBar[i * 2]     = (float)u;
-                    uvBar[i * 2 + 1] = (float)std::clamp((mesh.fy[i] * boxH) / std::max(1.0, barH), 0.0, 1.0);
+                    s_meshUVBar[i * 2]     = (float)u;
+                    s_meshUVBar[i * 2 + 1] = (float)std::clamp((mesh.fy[i] * boxH) / std::max(1.0, barH), 0.0, 1.0);
 
-                    uvContent[i * 2]     = (float)u;
-                    uvContent[i * 2 + 1] = (float)std::clamp((mesh.fy[i] * boxH - barH) / contentH, 0.0, 1.0);
+                    s_meshUVContent[i * 2]     = (float)u;
+                    s_meshUVContent[i * 2 + 1] = (float)std::clamp((mesh.fy[i] * boxH - barH) / contentH, 0.0, 1.0);
                 }
             }
 
-            // Draws a window through its deformed cloth mesh: the titlebar
-            // rows keep the gradient shader, the content rows sample the
-            // client texture, and the shadow follows the average surface
-            // displacement for a grounded feel.
+            // Deformed-window pass: the titlebar rows keep the gradient
+            // shader with the window's real rounding, the content rows use
+            // bottom-only rounding — chrome stays intact while the surface
+            // flexes.
             void drawWindowCloth(CGLEngine& e, const CWindow& window, uint32_t contentTex, bool hasContent, float alpha, float sw, float sh) {
                 const auto& mesh = window.clothMesh();
                 const auto  box  = CCompositor::get().windowBox(const_cast<CWindow*>(&window));
                 const auto  boxPos  = box.pos();
                 const auto  boxSize = box.size();
                 const int   barH = ChromeGeom::height();
+                const int   round = CConfigManager::get().windowRounding();
 
-                // Average displacement of the surface from its rigid rest
-                // position; the shadow leans with it.
                 Hyprutils::Math::Vector2D avg = {0, 0};
                 for (size_t i = 0; i < mesh.pos.size(); ++i)
                     avg += mesh.pos[i] - mesh.rest[i];
@@ -174,10 +175,10 @@ namespace ColibryShell {
                                (float)boxSize.x * 1.5f, (float)boxSize.y * 1.5f, 1.0f, 0.0f, sw, sh);
                 }
 
-                std::vector<float> positions, uvBar, uvContent;
-                fillMeshArrays(mesh, box, barH, positions, uvBar, uvContent);
+                fillMeshArrays(mesh, box, barH);
 
-                // Titlebar rows with the gradient shader.
+                const int vertexCount = (int)mesh.pos.size();
+
                 const uint32_t overlay = overlayTexture(e, window, window.size().x, barH);
                 const uint32_t barProg = e.progTitlebar();
                 glUseProgram(barProg);
@@ -189,13 +190,13 @@ namespace ColibryShell {
                 glActiveTexture(GL_TEXTURE1);
                 glBindTexture(GL_TEXTURE_2D, overlay);
                 glUniform1i(glGetUniformLocation(barProg, "uOverlayTex"), 1);
-                Draw::mesh(e, barProg, overlay, positions.data(), uvBar.data(), (int)mesh.pos.size(), mesh.indicesBar.data(), (int)mesh.indicesBar.size(),
-                           alpha, sw, sh);
+                Draw::mesh(e, barProg, overlay, s_meshPositions.data(), s_meshUVBar.data(), vertexCount, mesh.indicesBar.data(),
+                           (int)mesh.indicesBar.size(), alpha, sw, sh, (float)round, (float)boxPos.x, (float)boxPos.y, (float)boxSize.x, (float)barH);
 
-                // Content rows with the client texture.
                 if (hasContent)
-                    Draw::mesh(e, e.progQuad(), contentTex, positions.data(), uvContent.data(), (int)mesh.pos.size(), mesh.indicesContent.data(),
-                               (int)mesh.indicesContent.size(), alpha, sw, sh);
+                    Draw::mesh(e, e.progQuad(), contentTex, s_meshPositions.data(), s_meshUVContent.data(), vertexCount, mesh.indicesContent.data(),
+                               (int)mesh.indicesContent.size(), alpha, sw, sh, (float)std::min(round, (int)std::min(window.size().x, window.size().y) / 2),
+                               (float)boxPos.x, (float)boxPos.y, (float)boxSize.x, (float)boxSize.y, 0.0f);
             }
 
             void drawWindow(CGLEngine& e, const CWindow& window, int32_t screenW, int32_t screenH) {
@@ -212,8 +213,6 @@ namespace ColibryShell {
                 int32_t  cw = 0, ch = 0;
                 const bool hasContent = CGLCompositor::get().textureForSurface(window.surface(), contentTex, cw, ch);
 
-                // While the cloth is moving, the window renders as a
-                // deformed mesh instead of a plain quad.
                 if (window.clothActive()) {
                     drawWindowCloth(e, window, contentTex, hasContent, alpha, sw, sh);
                     return;
@@ -260,7 +259,7 @@ namespace ColibryShell {
 
                 if (hasContent)
                     Draw::quad(e, contentTex, (float)pos.x, fs ? (float)pos.y : (float)pos.y + barH, (float)size.x, (float)size.y, alpha,
-                               fs ? 0.0f : (float)std::min(round, (int)std::min(size.x, size.y) / 2), sw, sh);
+                               fs ? 0.0f : (float)std::min(round, (int)std::min(size.x, size.y) / 2), sw, sh, 0.0f);
             }
 
         }
@@ -278,7 +277,12 @@ namespace ColibryShell {
         }
 
         void drawCursor(CGLEngine& e, int32_t screenW, int32_t screenH) {
-            auto& cursor = *CCompositor::get().m_cursor;
+            auto& compositor = CCompositor::get();
+
+            if (compositor.fadeFactor(compositor.currentMs()) < 1.0)
+                return;
+
+            auto& cursor = *compositor.m_cursor;
 
             if (!TitleText::rasterizeCursor(cursor, s_cursorPixels, s_cursorW, s_cursorH))
                 return;

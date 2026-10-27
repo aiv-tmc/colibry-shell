@@ -17,9 +17,31 @@
 #include <GLES2/gl2.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <pixman.h>
 
+#include <drm_fourcc.h>
+
 namespace ColibryShell {
+
+    static constexpr int32_t MAX_TEXTURE_DIM = 16384;
+
+    // Mesa clients routinely produce the BGR little-endian variants; all
+    // four 32-bit formats the renderer can sample are accepted.
+    static bool dmaImportable(const SSurfaceDMA& dma) {
+        if (!dma.valid || dma.fd < 0 || dma.stride == 0)
+            return false;
+        if (dma.width <= 0 || dma.height <= 0 || dma.width > MAX_TEXTURE_DIM || dma.height > MAX_TEXTURE_DIM)
+            return false;
+
+        switch (dma.format) {
+            case DRM_FORMAT_ARGB8888:
+            case DRM_FORMAT_XRGB8888:
+            case DRM_FORMAT_ABGR8888:
+            case DRM_FORMAT_XBGR8888: return true;
+            default: return false;
+        }
+    }
 
     CGLCompositor& CGLCompositor::get() {
         static CGLCompositor s_instance;
@@ -66,8 +88,6 @@ namespace ColibryShell {
     bool CGLCompositor::textureForSurface(CSurface* surface, uint32_t& tex, int32_t& w, int32_t& h) {
         auto& entry = m_textures[surface];
 
-        // Reuse the cached texture while the surface carries no
-        // unpresented damage; commits invalidate it.
         if (entry.tex && surface->damage().empty()) {
             tex = entry.tex;
             w   = entry.w;
@@ -78,13 +98,30 @@ namespace ColibryShell {
         if (!entry.tex)
             entry.tex = m_engine.createTexture();
 
-        // Legacy dmabuf path: import the client-provided plane zero-copy.
-        if (surface->currentDMA().valid) {
-            if (!m_engine.importDMA(surface->currentDMA(), entry.tex))
+        const auto& dma = surface->currentDMA();
+        if (dma.valid) {
+            if (!dmaImportable(dma)) {
+                static CSurface* s_loggedSurface = nullptr;
+                if (s_loggedSurface != surface) {
+                    s_loggedSurface = surface;
+                    std::fprintf(stderr, "[colibry-shell] surface content rejected: dma fourcc=0x%x %ux%u stride=%u modifier=0x%lx\n", dma.format, dma.width,
+                                 dma.height, dma.stride, (unsigned long)dma.modifier);
+                }
                 return false;
+            }
 
-            entry.w = surface->currentDMA().width;
-            entry.h = surface->currentDMA().height;
+            if (!m_engine.importDMA(dma, entry.tex)) {
+                static CSurface* s_loggedImport = nullptr;
+                if (s_loggedImport != surface) {
+                    s_loggedImport = surface;
+                    std::fprintf(stderr, "[colibry-shell] dma import failed for surface (fourcc=0x%x modifier=0x%lx)\n", dma.format,
+                                 (unsigned long)dma.modifier);
+                }
+                return false;
+            }
+
+            entry.w = (int32_t)dma.width;
+            entry.h = (int32_t)dma.height;
             tex     = entry.tex;
             w       = entry.w;
             h       = entry.h;
@@ -102,13 +139,16 @@ namespace ColibryShell {
             return false;
         }
 
-        // Shared-memory path: the buffer data is only valid while retained.
+        const auto size = buffer->size();
+        if (size.x <= 0 || size.y <= 0 || size.x > MAX_TEXTURE_DIM || size.y > MAX_TEXTURE_DIM)
+            return false;
+
         buffer->retain();
-        m_engine.uploadRGBA(entry.tex, reinterpret_cast<const uint32_t*>(buffer->data()), buffer->size().x, buffer->size().y, buffer->stride() / 4);
+        m_engine.uploadRGBA(entry.tex, reinterpret_cast<const uint32_t*>(buffer->data()), size.x, size.y, buffer->stride() / 4);
         buffer->release();
 
-        entry.w = buffer->size().x;
-        entry.h = buffer->size().y;
+        entry.w = size.x;
+        entry.h = size.y;
         tex     = entry.tex;
         w       = entry.w;
         h       = entry.h;
@@ -127,8 +167,6 @@ namespace ColibryShell {
             single = window.get();
         }
 
-        // One fullscreen window and no overlays: the frame is a single
-        // textured quad per damage rectangle, nothing else.
         if (visible != 1 || !single->isFullscreen() || CSwitcher::get().active() || CLauncher::get().active() || m_fadeAlpha > 0.0)
             return false;
 
@@ -201,7 +239,6 @@ namespace ColibryShell {
         auto& compositor = CCompositor::get();
         m_fadeAlpha      = 1.0 - compositor.fadeFactor(compositor.currentMs());
 
-        // Full-screen overlays own the whole frame.
         if (CSwitcher::get().active()) {
             const bool ok = SwitcherDraw::renderFrame(m_engine, target, damage);
             glDisable(GL_SCISSOR_TEST);
@@ -240,8 +277,6 @@ namespace ColibryShell {
         }
 
         glDisable(GL_SCISSOR_TEST);
-        // The KMS commit follows immediately; make sure the GPU has the
-        // commands queued before the buffer is handed to the CRTC.
         glFlush();
         return true;
     }

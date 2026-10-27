@@ -137,11 +137,11 @@ namespace ColibryShell {
             .ack_configure       = ackConfigure,
         };
 
+        // The destroy callback only frees this struct. The CSurface pointer
+        // is not touched: clients free the wl_surface in any order, and a
+        // write through a dangling pointer here segfaults the teardown.
         wl_resource_set_implementation(resource, &IMPLEMENTATION, data, [](wl_resource* res) {
-            auto* data = static_cast<SXdgSurface*>(wl_resource_get_user_data(res));
-            if (data->surface)
-                data->surface->onCommit = nullptr;
-            delete data;
+            delete static_cast<SXdgSurface*>(wl_resource_get_user_data(res));
             wl_resource_set_user_data(res, nullptr);
         });
     }
@@ -196,11 +196,10 @@ namespace ColibryShell {
             .set_minimized    = setMinimized,
         };
 
-        // Single ownership: the factory registers the window in the
-        // compositor's list; the surface user data only shares the
-        // reference.
         data->window           = CWindow::create(data->surface, toplevel, resource);
         data->toplevelResource = toplevel;
+
+        std::fprintf(stderr, "[colibry-shell] client created toplevel\n");
 
         wl_resource_set_implementation(toplevel, &IMPLEMENTATION, data, nullptr);
     }
@@ -281,8 +280,6 @@ namespace ColibryShell {
         auto& compositor = CCompositor::get();
 
         if (!data->window->mapped()) {
-            // A window that asks for fullscreen before its first commit
-            // lands on a fresh empty workspace, tiled across it.
             compositor.moveWindowToWorkspace(data->window.get(), compositor.firstEmptyWorkspace());
             data->window->openTiledFullscreen();
             return;

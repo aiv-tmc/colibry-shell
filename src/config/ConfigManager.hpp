@@ -1,7 +1,4 @@
-// TOML configuration for the Colibry compositor.
-//
-// The manager loads the system config and merges the user override on
-// top. Unknown keys are ignored so newer configs stay loadable.
+// TOML configuration for the ColibryShell compositor.
 
 #pragma once
 
@@ -21,8 +18,6 @@ namespace ColibryShell {
       public:
         static CConfigManager& get();
 
-        // Loads the system config and merges the user override. Returns
-        // false when neither exists; defaults remain in effect.
         bool load();
 
         const std::string& wallpaperPath() const;
@@ -50,6 +45,8 @@ namespace ColibryShell {
         uint64_t openAnimMs() const;
         int      loginFadeMs() const;
         int      loginUnlockMs() const;
+
+        bool hdrEnabled() const;
 
         const std::string& terminal() const;
 
@@ -79,10 +76,12 @@ namespace ColibryShell {
         std::string m_titlebarFont;
 
         int      m_windowRounding = 10;
-        int      m_screenRounding = 0;
+        int      m_screenRounding = 12;
         uint64_t m_openAnimMs     = 220;
-        int      m_loginFadeMs    = 750;
+        int      m_loginFadeMs    = 2500;
         int      m_loginUnlockMs  = 250;
+
+        bool m_hdrEnabled = true;
 
         std::string m_terminal = "ghostty";
 
@@ -90,8 +89,6 @@ namespace ColibryShell {
         std::vector<std::string>  m_binds;
 
       public:
-        // Public: the compositor holds the manager through a shared
-        // pointer built with makeShared.
         CConfigManager()  = default;
         ~CConfigManager() = default;
     };

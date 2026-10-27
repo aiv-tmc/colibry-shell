@@ -42,7 +42,6 @@ namespace ColibryShell {
         } catch (...) { return fallback; }
     }
 
-    // Splits a TOML list of quoted strings into entries.
     static std::vector<std::string> parseList(const std::string& v) {
         std::vector<std::string> out;
 
@@ -72,13 +71,18 @@ namespace ColibryShell {
         if (home)
             found |= loadFile(std::string(home) + "/.config/colibry/colibry.toml");
 
-        // No wallpaper configured: fall back to the image shipped with the
-        // shell package so the desktop is not a bare dark fill.
+        // Running uninstalled from a repo checkout: a config next to the
+        // working directory applies on top of nothing else.
+        if (!found)
+            found |= loadFile("colibry.toml");
+
         if (m_wallpaperPath.empty()) {
             for (const auto& candidate : {"/usr/local/share/colibry-shell/wallpapers/wallpaper.jpg",
                                           "/usr/share/colibry-shell/wallpapers/wallpaper.jpg",
                                           "/usr/local/share/colibry-shell/wallpapers/wallpaper.png",
-                                          "/usr/share/colibry-shell/wallpapers/wallpaper.png"}) {
+                                          "/usr/share/colibry-shell/wallpapers/wallpaper.png",
+                                          "assets/wallpaper.jpg",
+                                          "assets/wallpaper.png"}) {
                 std::error_code ec;
                 if (std::filesystem::exists(candidate, ec)) {
                     m_wallpaperPath = candidate;
@@ -86,6 +90,11 @@ namespace ColibryShell {
                 }
             }
         }
+
+        if (m_wallpaperPath.empty())
+            std::fprintf(stderr, "[colibry-shell] config: no wallpaper found, using the solid background\n");
+        else
+            std::fprintf(stderr, "[colibry-shell] config: wallpaper = %s\n", m_wallpaperPath.c_str());
 
         return found;
     }
@@ -129,8 +138,11 @@ namespace ColibryShell {
             m_wallpaperPath = unquote(rawValue);
             return;
         }
-        if (k == "wallpaper_fit") {
-            m_wallpaperFit = unquote(rawValue);
+        if (k == "wallpaper_fit" || k == "wallpaper_path") {
+            if (k == "wallpaper_path")
+                m_wallpaperPath = unquote(rawValue);
+            else
+                m_wallpaperFit = unquote(rawValue);
             return;
         }
         if (k == "cursor_theme") {
@@ -190,7 +202,7 @@ namespace ColibryShell {
             return;
         }
         if (k == "general_screen_rounding" || k == "screen_rounding") {
-            m_screenRounding = std::max(0, toInt(rawValue, 0));
+            m_screenRounding = std::max(0, toInt(rawValue, 12));
             return;
         }
         if (k == "general_open_anim_ms" || k == "open_anim_ms") {
@@ -198,14 +210,18 @@ namespace ColibryShell {
             return;
         }
         if (k == "general_login_fade_ms" || k == "login_fade_ms") {
-            m_loginFadeMs = std::max(0, toInt(rawValue, 750));
+            m_loginFadeMs = std::max(0, toInt(rawValue, 2500));
             return;
         }
         if (k == "general_login_unlock_ms" || k == "login_unlock_ms") {
             m_loginUnlockMs = std::max(0, toInt(rawValue, 250));
             return;
         }
-        if (k == "terminal") {
+        if (k == "hdr_enabled" || k == "general_hdr_enabled") {
+            m_hdrEnabled = toInt(rawValue, 1) != 0;
+            return;
+        }
+        if (k == "terminal" || k == "shell_terminal") {
             m_terminal = unquote(rawValue);
             return;
         }
@@ -261,6 +277,8 @@ namespace ColibryShell {
     uint64_t CConfigManager::openAnimMs() const { return m_openAnimMs; }
     int      CConfigManager::loginFadeMs() const { return m_loginFadeMs; }
     int      CConfigManager::loginUnlockMs() const { return m_loginUnlockMs; }
+
+    bool CConfigManager::hdrEnabled() const { return m_hdrEnabled; }
 
     const std::string& CConfigManager::terminal() const { return m_terminal; }
 

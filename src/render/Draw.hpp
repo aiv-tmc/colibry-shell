@@ -1,10 +1,4 @@
 // Immediate-mode drawing helpers shared by every scene pass.
-//
-// Each helper draws geometry through the given program with the engine's
-// shared vertex shader. `quad` positions a unit quad through uniforms;
-// `mesh` feeds client-side vertex buffers (positions in desktop pixels)
-// through the same shader with an identity transform, which lets the
-// elastic cloth deform windows without any extra shader.
 
 #pragma once
 
@@ -15,8 +9,12 @@
 namespace ColibryShell {
     namespace Draw {
 
-        // Draws a textured quad with optional signed-distance rounded corners.
-        inline void quad(CGLEngine& e, uint32_t tex, float x, float y, float w, float h, float alpha, float radius, float screenW, float screenH) {
+        inline void setFlip(uint32_t prog, CGLEngine& e) {
+            glUniform2f(glGetUniformLocation(prog, "uFlip"), e.flipX(), e.flipY());
+        }
+
+        inline void quad(CGLEngine& e, uint32_t tex, float x, float y, float w, float h, float alpha, float radius, float screenW, float screenH,
+                         float roundTop = 1.0f) {
             const uint32_t prog = e.progQuad();
 
             glUseProgram(prog);
@@ -25,8 +23,10 @@ namespace ColibryShell {
             glUniform2f(glGetUniformLocation(prog, "uScreenSize"), screenW, screenH);
             glUniform1f(glGetUniformLocation(prog, "uAlpha"), alpha);
             glUniform1f(glGetUniformLocation(prog, "uRadius"), radius);
+            glUniform1f(glGetUniformLocation(prog, "uRoundTop"), roundTop);
             glUniform2f(glGetUniformLocation(prog, "uQuadSize"), w, h);
             glUniform2f(glGetUniformLocation(prog, "uQuadOrigin"), x, y);
+            setFlip(prog, e);
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
@@ -42,7 +42,6 @@ namespace ColibryShell {
             glDisableVertexAttribArray(1);
         }
 
-        // Draws a solid colored quad with optional rounded corners.
         inline void solid(CGLEngine& e, float r, float g, float b, float a, float x, float y, float w, float h, float radius, float screenW, float screenH) {
             const uint32_t prog = e.progSolid();
 
@@ -54,6 +53,7 @@ namespace ColibryShell {
             glUniform2f(glGetUniformLocation(prog, "uDstOrigin"), x, y);
             glUniform2f(glGetUniformLocation(prog, "uDstSize"), w, h);
             glUniform2f(glGetUniformLocation(prog, "uScreenSize"), screenW, screenH);
+            setFlip(prog, e);
 
             const float verts[] = {0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0};
             glEnableVertexAttribArray(0);
@@ -65,22 +65,22 @@ namespace ColibryShell {
             glDisableVertexAttribArray(1);
         }
 
-        // Draws an indexed triangle mesh. `positions` holds interleaved
-        // pixel coordinates (x, y per vertex), `uvs` interleaved texture
-        // coordinates; both are client-side float arrays of `vertexCount`
-        // vertices. The program's transform uniforms are set to identity so
-        // `positions` land on screen verbatim, which is what the cloth
-        // deformation needs.
+        // Draws an indexed mesh with full chrome context: the signed-
+        // distance uniforms describe the logical quad (window box) the
+        // mesh deforms, so rounding follows the surface while it flexes.
         inline void mesh(CGLEngine& e, uint32_t prog, uint32_t tex, const float* positions, const float* uvs, int vertexCount, const uint32_t* indices,
-                         int indexCount, float alpha, float screenW, float screenH) {
+                         int indexCount, float alpha, float screenW, float screenH, float radius, float quadX, float quadY, float quadW, float quadH,
+                         float roundTop = 1.0f) {
             glUseProgram(prog);
             glUniform2f(glGetUniformLocation(prog, "uDstOrigin"), 0.0f, 0.0f);
             glUniform2f(glGetUniformLocation(prog, "uDstSize"), 1.0f, 1.0f);
             glUniform2f(glGetUniformLocation(prog, "uScreenSize"), screenW, screenH);
             glUniform1f(glGetUniformLocation(prog, "uAlpha"), alpha);
-            glUniform1f(glGetUniformLocation(prog, "uRadius"), 0.0f);
-            glUniform2f(glGetUniformLocation(prog, "uQuadSize"), screenW, screenH);
-            glUniform2f(glGetUniformLocation(prog, "uQuadOrigin"), 0.0f, 0.0f);
+            glUniform1f(glGetUniformLocation(prog, "uRadius"), radius);
+            glUniform1f(glGetUniformLocation(prog, "uRoundTop"), roundTop);
+            glUniform2f(glGetUniformLocation(prog, "uQuadSize"), quadW, quadH);
+            glUniform2f(glGetUniformLocation(prog, "uQuadOrigin"), quadX, quadY);
+            setFlip(prog, e);
 
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);

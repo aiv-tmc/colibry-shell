@@ -23,7 +23,8 @@ namespace ColibryShell {
     static const Vector2D MIN_SIZE      = {80, 60};
     static const Vector2D FALLBACK_SIZE = {900, 600};
 
-    // xdg_toplevel protocol constants.
+    static constexpr double MAX_REASONABLE_DIM = 16384.0;
+
     static constexpr uint32_t XDG_TOPLEVEL_EVENT_CONFIGURE = 0;
     static constexpr uint32_t XDG_TOPLEVEL_EVENT_CLOSE     = 1;
     static constexpr uint32_t XDG_TOPLEVEL_STATE_MAXIMIZED  = 1;
@@ -36,9 +37,11 @@ namespace ColibryShell {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
+    static bool dmaSizeSane(const SSurfaceDMA& dma) {
+        return dma.width > 0 && dma.height > 0 && dma.width <= MAX_REASONABLE_DIM && dma.height <= MAX_REASONABLE_DIM;
+    }
+
     Hyprutils::Memory::CSharedPointer<CWindow> CWindow::create(CSurface* surface, wl_resource* toplevelResource, wl_resource* xdgSurfaceResource) {
-        // makeShared produces the single owning reference; the copy pushed
-        // below shares that same control block.
         auto window = Hyprutils::Memory::makeShared<CWindow>(surface, toplevelResource, xdgSurfaceResource);
         CCompositor::get().m_windows.push_back(window);
         return window;
@@ -48,15 +51,13 @@ namespace ColibryShell {
         m_surface(surface), m_toplevelResource(toplevelResource), m_xdgSurfaceResource(xdgSurfaceResource) {
         m_surface->onCommit = [this](CSurface*) { onSurfaceCommit(); };
 
-        // The client may not commit before the initial configure went out;
-        // sending it from the constructor guarantees the handshake starts
-        // even if nothing else drives it.
         CXdgShell::sendInitialConfigure(m_xdgSurfaceResource);
     }
 
     CWindow::~CWindow() {
-        if (m_surface)
-            m_surface->onCommit = nullptr;
+        // The surface may already be destroyed (clients free the wl_surface
+        // before or after the toplevel in any order), so nothing here may
+        // write through m_surface.
         CCompositor::get().removeWindow(this);
     }
 
@@ -174,9 +175,6 @@ namespace ColibryShell {
     Vector2D CWindow::clampedPosition(Vector2D pos) const {
         const auto screen = CCompositor::get().m_outputs.empty() ? Vector2D(1920, 1080) : CCompositor::get().m_outputs.front()->size();
 
-        // Keep every side reachable; when the window is larger than the
-        // screen (or has no size yet) the raw bounds collapse and must be
-        // kept ordered for std::clamp.
         const double rawLoX = screen.x - m_size.x - 40.0;
         const double rawLoY = screen.y - m_size.y - (double)ChromeGeom::height() - 40.0;
 
@@ -300,17 +298,15 @@ namespace ColibryShell {
     void CWindow::onMapped() {
         m_mapped = true;
 
-        // Dmabuf-only clients carry the size in the buffer attributes; if
-        // no size arrived at all, fall back so the window is visible and
-        // clampable.
         if (m_size.x <= 1.0 || m_size.y <= 1.0) {
             const auto buffer = m_surface->currentBuffer();
             if (buffer)
                 m_size = buffer->size();
-            else if (m_surface->currentDMA().valid)
+
+            if ((m_size.x <= 1.0 || m_size.y <= 1.0) && m_surface->currentDMA().valid && dmaSizeSane(m_surface->currentDMA()))
                 m_size = Vector2D((double)m_surface->currentDMA().width, (double)m_surface->currentDMA().height);
 
-            if (m_size.x <= 1.0 || m_size.y <= 1.0)
+            if (m_size.x <= 1.0 || m_size.y <= 1.0 || m_size.x > MAX_REASONABLE_DIM || m_size.y > MAX_REASONABLE_DIM)
                 m_size = FALLBACK_SIZE;
         }
 
@@ -351,7 +347,7 @@ namespace ColibryShell {
                 m_size = buffer->size();
                 clothNudge();
                 CCompositor::get().addDamage(CCompositor::get().windowBox(this));
-            } else if (m_surface->currentDMA().valid) {
+            } else if (m_surface->currentDMA().valid && dmaSizeSane(m_surface->currentDMA())) {
                 const Vector2D dmaSize((double)m_surface->currentDMA().width, (double)m_surface->currentDMA().height);
                 if (dmaSize != m_size) {
                     m_size = dmaSize;

@@ -31,6 +31,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <execinfo.h>
+
 #include <poll.h>
 #include <unistd.h>
 
@@ -43,7 +45,17 @@ namespace ColibryShell {
     static constexpr uint64_t FRAME_INTERVAL_MS = 4;
     static constexpr int      MAX_WORKSPACE     = 10;
 
+    // First safety-net grace, then backoff doubles on every net fired in a
+    // row while frame events are missing (starvation detector in the tick).
+    static constexpr uint64_t FRAME_COMPLETION_MS = 150;
+
     static uint64_t s_lastTickMs = 0;
+
+    // Starvation state: consecutive timer-driven completions without a
+    // real frame event between them.
+    static uint64_t s_starvations      = 0;
+    static uint64_t s_lastFrameEvents  = 0;
+    static uint64_t s_safetyBackoffMs  = FRAME_COMPLETION_MS;
 
     static volatile sig_atomic_t g_framePresented = 0;
 
@@ -65,13 +77,22 @@ namespace ColibryShell {
     static void backendLog(Aquamarine::eBackendLogLevel level, const std::string& message) {
         if (level <= Aquamarine::AQ_LOG_DEBUG)
             return;
-        std::fprintf(stderr, "[colibry backend:%s] %s\n", logPrefix(level), message.c_str());
+        std::fprintf(stderr, "[colibry-shell backend:%s] %s\n", logPrefix(level), message.c_str());
     }
 
     static void watchdogHandler(int) {
-        static const char MSG[] = "[colibry-shell] watchdog: no frame presented at startup, exiting\n";
+        static const char MSG[] = "[colibry-shell] watchdog: startup stalled, exiting\n";
         write(STDERR_FILENO, MSG, sizeof(MSG) - 1);
         _exit(1);
+    }
+
+    static void crashHandler(int sig) {
+        void* frames[64];
+        const int count = backtrace(frames, 64);
+        std::fprintf(stderr, "[colibry-shell] crash: signal %d, stack trace:\n", sig);
+        backtrace_symbols_fd(frames, count, STDERR_FILENO);
+        std::signal(sig, SIG_DFL);
+        raise(sig);
     }
 
     static std::string resolveTerminal() {
@@ -128,20 +149,14 @@ namespace ColibryShell {
         return m_renderer;
     }
 
-    void CCompositor::requestExit() { get().m_eventLoop.quit(); }
-
-    bool CCompositor::isShuttingDown() const { return m_shutdown; }
-
-    void CCompositor::notifyFramePresented() {
-        g_framePresented = 1;
-        alarm(0);
-    }
-
+    void     CCompositor::requestExit() { get().m_eventLoop.quit(); }
+    bool     CCompositor::isShuttingDown() const { return m_shutdown; }
+    void     CCompositor::notifyFramePresented() { g_framePresented = 1; alarm(0); }
     uint64_t CCompositor::startMs() const { return m_startMs; }
     uint64_t CCompositor::currentMs() const { return nowMs(); }
 
     double CCompositor::fadeFactor(uint64_t now) const {
-        const int fadeMs = m_config ? m_config->loginFadeMs() : 750;
+        const int fadeMs = m_config ? m_config->loginFadeMs() : 2500;
         if (fadeMs <= 0)
             return 1.0;
 
@@ -150,15 +165,17 @@ namespace ColibryShell {
     }
 
     bool CCompositor::inputLocked() const {
-        const int fadeMs  = m_config ? m_config->loginFadeMs() : 750;
-        const int extraMs = m_config ? m_config->loginUnlockMs() : 250;
-        return nowMs() < m_startMs + (uint64_t)fadeMs + (uint64_t)extraMs;
+        const int unlockMs = m_config ? m_config->loginUnlockMs() : 250;
+        return nowMs() < m_startMs + (uint64_t)unlockMs;
     }
 
     bool CCompositor::init() {
         std::fprintf(stderr, "[colibry-shell] starting compositor %s\n", COLIBRYSHELL_VERSION);
 
-        m_startMs = nowMs();
+        std::signal(SIGALRM, watchdogHandler);
+        alarm(20);
+
+        unsetenv("WAYLAND_DISPLAY");
 
         m_config = Hyprutils::Memory::makeShared<CConfigManager>();
         m_config->load();
@@ -201,14 +218,10 @@ namespace ColibryShell {
         drm.backendType        = Aquamarine::AQ_BACKEND_DRM;
         drm.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
 
-        Aquamarine::SBackendImplementationOptions wayland;
-        wayland.backendType        = Aquamarine::AQ_BACKEND_WAYLAND;
-        wayland.backendRequestMode = Aquamarine::AQ_BACKEND_REQUEST_IF_AVAILABLE;
-
         Aquamarine::SBackendOptions options;
         options.logFunction = backendLog;
 
-        m_backend = Aquamarine::CBackend::create({drm, wayland}, options);
+        m_backend = Aquamarine::CBackend::create({drm}, options);
         if (!m_backend) {
             std::fprintf(stderr, "[colibry-shell] failed to create the backend\n");
             return false;
@@ -226,8 +239,6 @@ namespace ColibryShell {
             get().m_seat->onNewPointer(pointer);
         });
 
-        // Outputs may appear during start(), before the GPU renderer
-        // exists; their setup is deferred and retried below.
         if (!m_backend->start()) {
             std::fprintf(stderr, "[colibry-shell] failed to start the backend\n");
             return false;
@@ -247,7 +258,8 @@ namespace ColibryShell {
         if (!SceneDraw::initTitleFont(m_config->titlebarFont().c_str()))
             std::fprintf(stderr, "[colibry-shell] titlebar font unavailable; titles will be blank\n");
 
-        // Late setup for outputs that arrived during backend start.
+        m_startMs = nowMs();
+
         for (const auto& output : m_outputs) {
             if (output->presented())
                 continue;
@@ -267,26 +279,21 @@ namespace ColibryShell {
 
         m_eventLoop.addFD(m_display->fd(), POLLIN | POLLOUT, [this](short) { m_display->dispatch(); });
 
-        // Frame tick: cursor smoothing, cloth physics, closing fades, open
-        // animations, then presents outputs with pending damage.
         m_eventLoop.addTimer(FRAME_INTERVAL_MS, [] {
             auto& self = get();
 
             const auto now = nowMs();
-            for (const auto& output : self.m_outputs) {
-                // Completing frames here as well keeps a steady cadence on
-                // stacks whose backend never emits the frame event.
-                if (output->framePending() && now - output->lastCommitMs() > 33)
-                    output->recoverFrame();
-
-                if (output->needsRender())
-                    output->present();
-            }
-
             const auto dt  = s_lastTickMs ? now - s_lastTickMs : (uint64_t)FRAME_INTERVAL_MS;
             s_lastTickMs   = now;
 
-            bool animating = self.m_cursor->step(now);
+            const bool fading = self.fadeFactor(now) < 1.0;
+            if (fading)
+                self.addFullDamage();
+
+            bool animating = self.m_cursor->step(now) || fading;
+
+            if (animating)
+                self.addDamage(self.m_cursor->damageBox());
 
             CDragManager::get().stepSprings((double)dt);
 
@@ -311,26 +318,43 @@ namespace ColibryShell {
                 self.removeWindow(window);
 
             for (const auto& output : self.m_outputs) {
-                if (output->needsRender() || animating)
+                // Starvation tracking: a timer completion that fires while
+                // the backend's frame-event counter has not advanced means
+                // events stopped flowing; back off exponentially instead of
+                // hammering the GPU with frames that get rejected.
+                const uint64_t events = output->frameEvents();
+                if (output->framePending() && now - output->lastCommitMs() > s_safetyBackoffMs) {
+                    ++s_starvations;
+                    if (events == s_lastFrameEvents) {
+                        s_safetyBackoffMs = std::min<uint64_t>(s_safetyBackoffMs * 2, 2000);
+                    } else {
+                        s_safetyBackoffMs = FRAME_COMPLETION_MS;
+                    }
+                    output->recoverFrame();
+                }
+                s_lastFrameEvents = events;
+
+                if (output->needsRender())
                     output->present();
             }
         });
 
-        // Liveness heal: re-announce backend descriptors, force damage
-        // after stalls (VT switches).
         m_eventLoop.addTimer(2000, [] {
             auto& self = get();
 
-            self.registerPollFDs();
-
-            const auto now   = nowMs();
-            bool       stale = false;
+            const auto now = nowMs();
             for (const auto& output : self.m_outputs) {
-                if (now - output->lastCommitMs() > 1500)
-                    stale = true;
+                // Liveness telemetry: whichever counter stops advancing in
+                // the last line before a freeze names the wedged stage.
+                std::fprintf(stderr,
+                             "[colibry-shell] alive: commit=%llums frames=%llu nets=%llu reject=%llu pending=%d windows=%zu cursor=%.0f,%.0f\n",
+                             (unsigned long long)(now - output->lastCommitMs()), (unsigned long long)output->frameEvents(),
+                             (unsigned long long)output->safetyNets(), (unsigned long long)output->rejections(), output->pendingDamageRects(),
+                             self.m_windows.size(), self.m_cursor->position().x, self.m_cursor->position().y);
+
+                if (output->needsRender() && now - output->lastCommitMs() > 1500)
+                    self.addFullDamage();
             }
-            if (stale)
-                self.addFullDamage();
         });
 
         m_ipc = Hyprutils::Memory::makeShared<CIPC>();
@@ -356,11 +380,8 @@ namespace ColibryShell {
         const auto ctx = Hyprutils::Memory::makeShared<COutput>(output);
 
         if (m_outputs.empty()) {
-            // The native pixel size comes from the output's mode list; it
-            // is valid before the first mode is committed to the CRTC.
             const auto mode = output->preferredMode() ? output->preferredMode() :
                                                         (output->modes.empty() ? nullptr : output->modes.front());
-
             if (mode) {
                 m_cursor->setBounds(mode->pixelSize);
                 m_cursor->setPosition(mode->pixelSize / 2.0);
@@ -368,8 +389,6 @@ namespace ColibryShell {
             }
         }
 
-        // During backend start the GPU renderer is not ready yet; the
-        // output is registered now and set up by the retry in init().
         if (CGLCompositor::get().ready()) {
             if (!ctx->setup())
                 std::fprintf(stderr, "[colibry-shell] failed to set up output %s\n", output->name.c_str());
@@ -381,17 +400,14 @@ namespace ColibryShell {
     }
 
     int CCompositor::run() {
-        std::signal(SIGUSR1, [](int) { requestExit(); });
         std::signal(SIGINT, [](int) { requestExit(); });
         std::signal(SIGTERM, [](int) { requestExit(); });
 
-        std::signal(SIGSEGV, [](int) { _exit(139); });
-        std::signal(SIGABRT, [](int) { _exit(134); });
-        std::signal(SIGBUS, [](int) { _exit(135); });
+        std::signal(SIGSEGV, crashHandler);
+        std::signal(SIGABRT, crashHandler);
+        std::signal(SIGBUS, crashHandler);
 
-        std::signal(SIGALRM, watchdogHandler);
-        if (!g_framePresented)
-            alarm(20);
+        std::signal(SIGUSR1, [](int) { requestExit(); });
 
         std::fprintf(stderr, "[colibry-shell] entering event loop\n");
         const int code = m_eventLoop.run();
@@ -401,9 +417,11 @@ namespace ColibryShell {
 
     void CCompositor::shutdown() {
         std::fprintf(stderr, "[colibry-shell] shutting down\n");
+        m_shutdown      = true;
+        m_focusedWindow = nullptr;
 
-        m_windows.clear();
-        m_outputs.clear();
+        { auto windows = std::exchange(m_windows, {}); }
+
         m_ipc.reset();
         m_renderer.reset();
         m_xdgShell.reset();
@@ -413,7 +431,9 @@ namespace ColibryShell {
         if (m_display)
             m_display->destroy();
         m_display.reset();
+
         m_backend.reset();
+        m_outputs.clear();
     }
 
     void CCompositor::requestRender() {

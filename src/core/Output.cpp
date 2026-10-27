@@ -32,18 +32,8 @@ namespace ColibryShell {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    // Puts a region back into the global damage pool box by box (the pool
-    // only accepts boxes).
-    static void readdDamage(const Hyprutils::Math::CRegion& damage) {
-        auto& compositor = CCompositor::get();
-
-        int         count = 0;
-        const auto* rects = pixman_region32_rectangles(damage.pixman(), &count);
-
-        for (int i = 0; i < count; ++i) {
-            compositor.addDamage({Hyprutils::Math::Vector2D((double)rects[i].x1, (double)rects[i].y1),
-                                  Hyprutils::Math::Vector2D((double)(rects[i].x2 - rects[i].x1), (double)(rects[i].y2 - rects[i].y1))});
-        }
+    static void regionAdd(Hyprutils::Math::CRegion& dst, const Hyprutils::Math::CRegion& src) {
+        pixman_region32_union(dst.pixman(), dst.pixman(), src.pixman());
     }
 
     COutput::COutput(Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> output) : m_output(output) {
@@ -65,6 +55,12 @@ namespace ColibryShell {
 
     uint64_t COutput::lastCommitMs() const {
         return m_lastCommitMs;
+    }
+
+    int COutput::pendingDamageRects() const {
+        int count = 0;
+        pixman_region32_rectangles(m_pendingDamage[m_bufferIndex].pixman(), &count);
+        return count;
     }
 
     void COutput::invalidateBackground() {
@@ -129,7 +125,7 @@ namespace ColibryShell {
         return best;
     }
 
-    bool COutput::allocateBuffer(const Hyprutils::Math::Vector2D& pixelSize) {
+    bool COutput::allocateBuffers(const Hyprutils::Math::Vector2D& pixelSize) {
         const auto* rule = matchingRule();
 
         const double scale = (rule && rule->scale > 0.0) ? rule->scale : 1.0;
@@ -141,15 +137,38 @@ namespace ColibryShell {
             return false;
         }
 
-        m_buffer = factory->createLinearBuffer(size);
-        if (!m_buffer) {
-            std::fprintf(stderr, "[colibry-shell] failed to allocate a buffer for %s\n", m_output->name.c_str());
-            return false;
+        for (int i = 0; i < m_bufferCount; ++i) {
+            m_buffers[i] = factory->createLinearBuffer(size);
+            if (!m_buffers[i]) {
+                std::fprintf(stderr, "[colibry-shell] failed to allocate buffer %d for %s\n", i, m_output->name.c_str());
+                return false;
+            }
         }
 
         m_pixelSize       = size;
+        m_bufferIndex     = 0;
         m_backgroundDirty = true;
         m_fullRedraw      = true;
+        return true;
+    }
+
+    bool COutput::growBufferPool() {
+        if (m_bufferCount >= MAX_BUFFERS)
+            return false;
+
+        const auto factory = CCompositor::get().renderer();
+        if (!factory)
+            return false;
+
+        const auto buffer = factory->createLinearBuffer(m_pixelSize);
+        if (!buffer)
+            return false;
+
+        m_buffers[m_bufferCount] = buffer;
+        m_pendingDamage[m_bufferCount].clear();
+        ++m_bufferCount;
+
+        std::fprintf(stderr, "[colibry-shell] %s: buffer pool grown to %d\n", m_output->name.c_str(), m_bufferCount);
         return true;
     }
 
@@ -163,6 +182,47 @@ namespace ColibryShell {
         CGLCompositor::get().updateBackground(m_backgroundPixels, m_pixelSize.x, m_pixelSize.y);
     }
 
+    // Attaches static HDR10 metadata (PQ, P3-D65, 1000-nit peak) when HDR
+    // is configured and the installed Aquamarine exposes the HDR output
+    // API; without that API the build compiles this path out and the
+    // output stays in SDR.
+    void COutput::tryEnableHDR() {
+        m_hdrActive = false;
+
+        if (!CConfigManager::get().hdrEnabled())
+            return;
+
+#ifdef COLIBRYSHELL_AQ_HDR
+        if (!m_output->supportsHDR()) {
+            std::fprintf(stderr, "[colibry-shell] %s: HDR requested but the panel does not report support\n", m_output->name.c_str());
+            return;
+        }
+
+        auto metadata                    = Hyprutils::Memory::makeShared<Aquamarine::SHDRMetadata>();
+        metadata->type                   = Aquamarine::eDataBlockType::TYPE1;
+        metadata->displayPrimariesRX     = 34000;
+        metadata->displayPrimariesRY     = 16000;
+        metadata->displayPrimariesGX     = 13250;
+        metadata->displayPrimariesGY     = 34500;
+        metadata->displayPrimariesBX     = 7500;
+        metadata->displayPrimariesBY     = 3000;
+        metadata->whitePointX            = 15635;
+        metadata->whitePointY            = 16450;
+        metadata->maxLuminance           = 1000 * 10000;
+        metadata->maxFrameAverageLuminance = 400 * 10000;
+        metadata->minLuminance           = 5;
+        metadata->maxCLL                 = 1000;
+        metadata->maxFALL                = 400;
+
+        m_output->state->hdrMetadata = metadata;
+
+        m_hdrActive = true;
+        std::fprintf(stderr, "[colibry-shell] %s: HDR10 metadata enabled (PQ, 1000 nits peak)\n", m_output->name.c_str());
+#else
+        std::fprintf(stderr, "[colibry-shell] %s: HDR requested but this Aquamarine build has no HDR output API\n", m_output->name.c_str());
+#endif
+    }
+
     bool COutput::setup() {
         const auto mode = pickMode();
         if (!mode) {
@@ -170,12 +230,14 @@ namespace ColibryShell {
             return false;
         }
 
-        if (!allocateBuffer(mode->pixelSize))
+        if (!allocateBuffers(mode->pixelSize))
             return false;
 
         m_output->state->setFormat(DRM_FORMAT_XRGB8888);
         m_output->state->setEnabled(true);
         m_output->state->setMode(mode);
+
+        tryEnableHDR();
 
         present();
 
@@ -191,6 +253,7 @@ namespace ColibryShell {
 
     void COutput::onFrame() {
         m_lastFrameEventMs = nowMs();
+        ++m_frameEvents;
         recoverFrame();
     }
 
@@ -198,9 +261,10 @@ namespace ColibryShell {
         if (!m_framePending)
             return;
 
+        ++m_safetyNets;
+
         m_framePending = false;
 
-        // Frame callbacks fire at presentation time.
         CCompositor::get().m_display->sendFrameDone((uint32_t)nowMs());
 
         if (m_needsRender)
@@ -220,11 +284,16 @@ namespace ColibryShell {
         }
         m_inPresent = true;
 
-        if (!m_buffer || !CGLCompositor::get().ready()) {
+        bool anyBuffer = true;
+        for (int i = 0; i < m_bufferCount; ++i)
+            anyBuffer = anyBuffer && m_buffers[i];
+        if (!anyBuffer || !CGLCompositor::get().ready()) {
             m_needsRender = true;
             m_inPresent   = false;
             return;
         }
+
+        const int index = m_bufferIndex;
 
         Hyprutils::Math::CRegion damage;
         if (m_fullRedraw) {
@@ -232,12 +301,16 @@ namespace ColibryShell {
         } else {
             damage = CCompositor::get().takeDamage();
         }
+        regionAdd(damage, m_pendingDamage[index]);
+        m_pendingDamage[index].clear();
 
         if (m_backgroundDirty) {
             rebuildBackground();
             m_backgroundDirty = false;
             damage            = Hyprutils::Math::CRegion();
             damage.add(Hyprutils::Math::CBox({0, 0}, m_pixelSize));
+            for (int i = 0; i < MAX_BUFFERS; ++i)
+                m_pendingDamage[i].clear();
         }
 
         if (CSwitcher::get().active() || CDragManager::get().active())
@@ -251,11 +324,8 @@ namespace ColibryShell {
             return;
         }
 
-        if (!CGLCompositor::get().renderFrame(m_buffer, damage)) {
-            // Render failed: the damage stays unconsumed so the next
-            // attempt repaints the same region (no trails).
-            if (!m_fullRedraw)
-                readdDamage(damage);
+        if (!CGLCompositor::get().renderFrame(m_buffers[index], damage)) {
+            regionAdd(m_pendingDamage[index], damage);
             m_nextCommitMs = now + COMMIT_BACKOFF_MS;
             m_needsRender  = true;
             m_inPresent    = false;
@@ -268,29 +338,32 @@ namespace ColibryShell {
         }
 
         m_output->state->addDamage(damage);
-        m_output->state->setBuffer(m_buffer);
+        m_output->state->setBuffer(m_buffers[index]);
 
         if (!m_output->commit()) {
-            // Rejected: a page-flip is still pending. The damage goes back
-            // so a deferred commit never drops a region; completion re-arms
-            // presentation through recoverFrame().
-            if (!m_fullRedraw)
-                readdDamage(damage);
-            m_nextCommitMs = now + COMMIT_BACKOFF_MS;
-            if (m_failures < 5)
-                std::fprintf(stderr, "[colibry-shell] frame commit deferred for %s (flip pending)\n", m_output->name.c_str());
-            ++m_failures;
-            m_needsRender = true;
-            m_inPresent   = false;
+            ++m_rejections;
+            regionAdd(m_pendingDamage[index], damage);
+            m_nextCommitMs = now + 250;
+            m_needsRender  = true;
+            m_inPresent    = false;
+
+            if (m_rejections % 3 == 0)
+                growBufferPool();
             return;
         }
 
         m_framePending = true;
         m_lastCommitMs = now;
 
+        for (int i = 0; i < m_bufferCount; ++i) {
+            if (i != index)
+                regionAdd(m_pendingDamage[i], damage);
+        }
+
+        m_bufferIndex = (m_bufferIndex + 1) % m_bufferCount;
+
         m_fullRedraw   = false;
         m_nextCommitMs = now + COMMIT_INTERVAL_MS;
-        m_failures     = 0;
 
         m_needsRender = false;
         m_presented   = true;

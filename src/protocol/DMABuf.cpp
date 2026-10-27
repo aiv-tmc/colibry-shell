@@ -1,4 +1,4 @@
-// Implementation of linux-dmabuf (single-plane, ARGB8888/XRGB8888 only).
+// Implementation of linux-dmabuf (single-plane 32-bit formats).
 
 #include "DMABuf.hpp"
 
@@ -12,7 +12,6 @@
 
 namespace ColibryShell {
 
-    // Accumulated state of one in-flight zwp_linux_buffer_params object.
     struct SParams {
         bool     hasPlane = false;
         int32_t  fd       = -1;
@@ -21,7 +20,6 @@ namespace ColibryShell {
         uint64_t modifier = 0;
     };
 
-    // Frees the dmabuf fd together with the wl_buffer resource.
     static void bufferDestroyCallback(wl_resource* res) {
         auto* attrs = static_cast<SDMABufAttrs*>(wl_resource_get_user_data(res));
         if (attrs) {
@@ -62,18 +60,18 @@ namespace ColibryShell {
 
         wl_resource_set_implementation(resource, &IMPLEMENTATION, data, nullptr);
 
-        // Advertise the two formats the renderer imports, each with the
-        // explicit linear modifier and the implicit-modifier wildcard
-        // (DRM_FORMAT_MOD_INVALID); Mesa refuses to allocate otherwise on
-        // most hardware.
-        zwp_linux_dmabuf_v1_send_format(resource, DRM_FORMAT_ARGB8888);
-        zwp_linux_dmabuf_v1_send_format(resource, DRM_FORMAT_XRGB8888);
+        // Advertise every format the renderer imports, each with the
+        // explicit linear modifier and the implicit-modifier wildcard, so
+        // Mesa can allocate regardless of its tiling preference.
+        static const uint32_t FORMATS[] = {DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_XBGR8888};
 
-        if (version >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION) {
-            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_ARGB8888, 0, 0);
-            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_XRGB8888, 0, 0);
-            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_ARGB8888, 0xFFFFFFFF, 0xFFFFFFFF);
-            zwp_linux_dmabuf_v1_send_modifier(resource, DRM_FORMAT_XRGB8888, 0xFFFFFFFF, 0xFFFFFFFF);
+        for (const uint32_t format : FORMATS) {
+            zwp_linux_dmabuf_v1_send_format(resource, format);
+
+            if (version >= ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION) {
+                zwp_linux_dmabuf_v1_send_modifier(resource, format, 0, 0);
+                zwp_linux_dmabuf_v1_send_modifier(resource, format, 0xFFFFFFFF, 0xFFFFFFFF);
+            }
         }
     }
 
@@ -127,9 +125,6 @@ namespace ColibryShell {
         (void)client;
     }
 
-    // Shared tail of create and create_immed: builds the wl_buffer from the
-    // collected params. Returns the buffer resource, or nullptr after
-    // posting an error to the params resource.
     static wl_resource* buildBuffer(wl_client* client, wl_resource* paramsResource, uint32_t bufferId, int32_t width, int32_t height,
                                     uint32_t format) {
         auto* params = static_cast<SParams*>(wl_resource_get_user_data(paramsResource));
@@ -139,9 +134,14 @@ namespace ColibryShell {
             return nullptr;
         }
 
-        if (format != DRM_FORMAT_ARGB8888 && format != DRM_FORMAT_XRGB8888) {
-            wl_resource_post_error(paramsResource, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT, "unsupported format");
-            return nullptr;
+        switch (format) {
+            case DRM_FORMAT_ARGB8888:
+            case DRM_FORMAT_XRGB8888:
+            case DRM_FORMAT_ABGR8888:
+            case DRM_FORMAT_XBGR8888: break;
+            default:
+                wl_resource_post_error(paramsResource, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_FORMAT, "unsupported format");
+                return nullptr;
         }
 
         if (width <= 0 || height <= 0) {
@@ -165,7 +165,6 @@ namespace ColibryShell {
         attrs->stride   = params->stride;
         attrs->offset   = params->offset;
 
-        // Ownership of the fd moves to the buffer resource.
         params->fd       = -1;
         params->hasPlane = false;
 

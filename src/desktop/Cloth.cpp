@@ -10,16 +10,12 @@ namespace ColibryShell {
     using Hyprutils::Math::CBox;
     using Hyprutils::Math::Vector2D;
 
-    // Verlet velocity retention: slightly below 1 keeps the wobble alive
-    // for a moment before the constraints bleed the energy off.
-    static constexpr double CLOTH_DAMPING = 0.982;
-
-    // Relaxation passes over the distance constraints per frame.
-    static constexpr int CLOTH_ITERATIONS = 3;
-
-    // Fraction of the rest gap closed per frame: soft enough to ripple,
-    // stiff enough to never look loose.
-    static constexpr double CLOTH_PULL = 0.16;
+    // Fabric feel: low damping bleeds wobble quickly, a strong pull keeps
+    // the sheet taut, and extra relaxation passes make it read as woven
+    // material instead of jelly.
+    static constexpr double CLOTH_DAMPING   = 0.94;
+    static constexpr int    CLOTH_ITERATIONS = 5;
+    static constexpr double CLOTH_PULL      = 0.38;
 
     static int vertexCount() {
         return (CLOTH_COLS + 1) * (CLOTH_ROWS + 1);
@@ -145,8 +141,6 @@ namespace ColibryShell {
         const Vector2D boxPos  = box.pos();
         const Vector2D boxSize = box.size();
 
-        // Rebuild the rest configuration from the logical box; while
-        // closing it collapses toward the center by the fade factor.
         const Vector2D center = boxPos + boxSize / 2.0;
         for (int i = 0; i < vertexCount(); ++i) {
             Vector2D r(boxPos.x + m_mesh.fx[i] * boxSize.x, boxPos.y + m_mesh.fy[i] * boxSize.y);
@@ -155,12 +149,8 @@ namespace ColibryShell {
             m_mesh.rest[i] = r;
         }
 
-        // The pin target is the window's logical origin; the pinned vertex
-        // sits at the grab point inside the window.
         const Vector2D pinAbs = m_mesh.pinTarget + m_mesh.pinLocal;
 
-        // Verlet integration with a soft pull toward rest: inertia keeps
-        // the overshoot, the pull keeps the sheet coherent.
         double maxDev = 0.0;
         for (int i = 0; i < vertexCount(); ++i) {
             if (m_mesh.pinned && i == m_mesh.pinIndex) {

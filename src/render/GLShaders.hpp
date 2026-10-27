@@ -1,46 +1,38 @@
 // GLES2 shader sources for the ColibryShell GPU renderer.
 //
-// Every visual primitive of the desktop is drawn by one of these programs:
-// textured quads with signed-distance rounded corners (window content,
-// wallpaper, cursor, cards), the titlebar gradient that derives its colors
-// from the window content texture, the Kawase blur chain used by overlays,
-// the selection falloff dim used by the switcher and the screen corner
-// mask. All geometry is emitted as a single unit quad per primitive;
-// positioning happens in the vertex shader through uniforms.
-//
-// Desktop coordinates are top-left origin. The KMS framebuffer bound
-// through EGL_LINUX_DMA_BUF scans out with memory row 0 at the top, while
-// GL clip space treats ndc y = -1 as the first row of the render target;
-// the Y negation maps desktop top onto that first row.
+// Byte-order convention: every texture is uploaded from native 32-bit
+// 0xAARRGGBB pixels; GL_RGBA reads them byte-swapped, so the fragment
+// shaders swap the channels back. Blending is premultiplied
+// (GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
 
 #pragma once
 
 namespace ColibryShell {
 
-    // Shared vertex shader: places a unit quad at uDstOrigin/uDstSize in
-    // desktop pixel coordinates and converts to NDC with a Y flip (desktop
-    // top-left origin vs GL bottom-left row order).
     static const char* QUAD_VERT = "attribute vec2 aPos;"
                                    "attribute vec2 aUV;"
                                    "varying vec2 vUV;"
                                    "uniform vec2 uDstOrigin;"
                                    "uniform vec2 uDstSize;"
                                    "uniform vec2 uScreenSize;"
+                                   "uniform vec2 uFlip;"
                                    "void main() {"
                                    "  vUV = aUV;"
                                    "  vec2 px = uDstOrigin + aPos * uDstSize;"
-                                   "  vec2 ndc = px / uScreenSize * 2.0 - 1.0;"
-                                   "  gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);"
+                                   "  vec2 ndc = (px / uScreenSize * 2.0 - 1.0) * uFlip;"
+                                   "  gl_Position = vec4(ndc.x, ndc.y, 0.0, 1.0);"
                                    "}";
 
-    // Textured quad with anti-aliased rounded corners. The corner radius is
-    // evaluated as a signed distance in pixel units, giving true vector
-    // rounding with smooth coverage instead of per-pixel clipping.
+    // Textured quad with signed-distance rounded corners. uRoundTop picks
+    // between rounding all four corners (windows overlay, cards) and only
+    // the bottom two (window content, whose top edge meets the square
+    // bottom of the titlebar so the two read as one surface).
     static const char* QUAD_FRAG = "precision mediump float;"
                                    "varying vec2 vUV;"
                                    "uniform sampler2D uTex;"
                                    "uniform float uAlpha;"
                                    "uniform float uRadius;"
+                                   "uniform float uRoundTop;"
                                    "uniform vec2 uQuadSize;"
                                    "uniform vec2 uQuadOrigin;"
                                    "float roundedDist(vec2 p) {"
@@ -48,18 +40,23 @@ namespace ColibryShell {
                                    "  vec2 q = abs(p - uQuadOrigin - uQuadSize * 0.5) - b;"
                                    "  return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - uRadius;"
                                    "}"
+                                   "float rectDist(vec2 p) {"
+                                   "  vec2 q = abs(p - uQuadOrigin - uQuadSize * 0.5) - uQuadSize * 0.5;"
+                                   "  return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);"
+                                   "}"
                                    "void main() {"
                                    "  vec4 c = texture2D(uTex, vUV);"
+                                   "  c.rgb = c.bgr;"
                                    "  float cov = 1.0;"
                                    "  if (uRadius > 0.5) {"
                                    "    float d = roundedDist(gl_FragCoord.xy - vec2(0.5));"
+                                   "    if (uRoundTop < 0.5 && gl_FragCoord.y > uQuadOrigin.y + uQuadSize.y * 0.5)"
+                                   "      d = rectDist(gl_FragCoord.xy - vec2(0.5));"
                                    "    cov = clamp(0.5 - d, 0.0, 1.0);"
                                    "  }"
-                                   "  gl_FragColor = vec4(c.rgb, c.a * uAlpha * cov);"
+                                   "  gl_FragColor = vec4(c.rgb * uAlpha * cov, c.a * uAlpha * cov);"
                                    "}";
 
-    // Solid colored quad with the same signed-distance rounding; used for
-    // the window shadow silhouette and flat accent fills.
     static const char* SOLID_FRAG = "precision mediump float;"
                                     "uniform vec4 uColor;"
                                     "uniform float uRadius;"
@@ -76,15 +73,9 @@ namespace ColibryShell {
                                     "    float d = roundedDist(gl_FragCoord.xy - vec2(0.5));"
                                     "    cov = clamp(0.5 - d, 0.0, 1.0);"
                                     "  }"
-                                    "  gl_FragColor = vec4(uColor.rgb, uColor.a * cov);"
+                                    "  gl_FragColor = vec4(uColor.rgb * uColor.a * cov, uColor.a * cov);"
                                     "}";
 
-    // Titlebar: a vertical gradient that visually continues the window.
-    // The top of the bar is tinted with the average color of the window's
-    // topmost pixel row; the bottom of the bar blends into a horizontally
-    // averaged, vertically widened sample of the window's top strip, so the
-    // bar reads as a blurred extension of the client content. Text and
-    // button glyphs arrive in uOverlayTex with premultiplied alpha.
     static const char* TITLEBAR_FRAG =
         "precision mediump float;"
         "varying vec2 vUV;"
@@ -95,6 +86,7 @@ namespace ColibryShell {
         "uniform float uRadius;"
         "uniform vec2 uQuadSize;"
         "uniform vec2 uQuadOrigin;"
+        "vec3 contentSample(vec2 uv) { return texture2D(uContentTex, uv).bgr; }"
         "float roundedTopDist(vec2 p) {"
         "  vec2 c = uQuadOrigin + uQuadSize * 0.5;"
         "  vec2 half_ = uQuadSize * 0.5;"
@@ -110,26 +102,24 @@ namespace ColibryShell {
         "  vec3 cBot = vec3(0.0);"
         "  for (int i = 0; i < 4; i++) {"
         "    float x = (float(i) + 0.5) / 4.0;"
-        "    cTop += texture2D(uContentTex, vec2(x, 0.002)).rgb;"
-        "    cBot += texture2D(uContentTex, vec2(x, 0.06)).rgb;"
-        "    cBot += texture2D(uContentTex, vec2(x, 0.12)).rgb;"
+        "    cTop += contentSample(vec2(x, 0.002));"
+        "    cBot += contentSample(vec2(x, 0.06));"
+        "    cBot += contentSample(vec2(x, 0.12));"
         "  }"
         "  cTop /= 4.0;"
         "  cBot /= 8.0;"
         "  vec3 base = mix(cTop, cBot, smoothstep(0.0, 1.0, vUV.y));"
         "  base = mix(uFallback.rgb, base, uHasContent);"
         "  vec4 ov = texture2D(uOverlayTex, vUV);"
-        "  vec3 col = mix(base, ov.rgb, ov.a);"
+        "  vec3 col = base * (1.0 - ov.a) + ov.rgb;"
         "  float cov = 1.0;"
         "  if (uRadius > 0.5) {"
         "    float d = roundedTopDist(gl_FragCoord.xy - vec2(0.5));"
         "    cov = clamp(0.5 - d, 0.0, 1.0);"
         "  }"
-        "  gl_FragColor = vec4(col, cov);"
+        "  gl_FragColor = vec4(col * cov, cov);"
         "}";
 
-    // Kawase downsample: four diagonal taps averaged. Repeated with growing
-    // offsets it builds a cheap, wide blur pyramid.
     static const char* BLUR_DOWN_FRAG = "precision mediump float;"
                                         "varying vec2 vUV;"
                                         "uniform sampler2D uTex;"
@@ -144,9 +134,6 @@ namespace ColibryShell {
                                         "  gl_FragColor = vec4(c * 0.25, 1.0);"
                                         "}";
 
-    // Kawase upsample: diagonal taps weighted 1, axis taps weighted 2,
-    // normalized by 12. Pulling the pyramid back up reconstructs a smooth
-    // blur without banding.
     static const char* BLUR_UP_FRAG = "precision mediump float;"
                                       "varying vec2 vUV;"
                                       "uniform sampler2D uTex;"
@@ -165,9 +152,6 @@ namespace ColibryShell {
                                       "  gl_FragColor = vec4(c / 12.0, 1.0);"
                                       "}";
 
-    // Selection falloff dim: black whose alpha is uDark inside the
-    // selection box and decays to zero over uFalloff pixels of signed
-    // distance from the box, so the far side of the screen stays untouched.
     static const char* DIM_FRAG = "precision mediump float;"
                                   "uniform vec4 uBox;"
                                   "uniform float uFalloff;"
@@ -182,9 +166,6 @@ namespace ColibryShell {
                                   "  gl_FragColor = vec4(0.0, 0.0, 0.0, a);"
                                   "}";
 
-    // Screen corner mask: everything outside the rounded screen rectangle
-    // is blended towards pure black, making the corners real, untouchable
-    // desktop borders rendered as true quarter-circle arcs.
     static const char* MASK_FRAG = "precision mediump float;"
                                    "uniform vec2 uScreenSize;"
                                    "uniform float uRadius;"

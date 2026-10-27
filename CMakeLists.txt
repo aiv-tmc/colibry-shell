@@ -36,6 +36,22 @@ pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 
 add_compile_definitions(COLIBRYSHELL_VERSION="${PROJECT_VERSION}")
 
+# HDR support needs an Aquamarine version whose output state carries HDR
+# metadata; older releases compile without the HDR code path.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${AQUAMARINE_INCLUDE_DIRS})
+check_cxx_source_compiles("
+  #include <aquamarine/output/Output.hpp>
+  int main() {
+      auto o = (Aquamarine::IOutput*)nullptr;
+      bool h = o->supportsHDR();
+      auto m = Hyprutils::Memory::makeShared<Aquamarine::SHDRMetadata>();
+      m->type = Aquamarine::eDataBlockType::TYPE1;
+      o->state->hdrMetadata = m;
+      return h ? 0 : 0;
+  }
+" COLIBRYSHELL_AQ_HDR)
+
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 
 pkg_get_variable(WAYLAND_SERVER_PKGDATADIR wayland-server pkgdatadir)
@@ -112,6 +128,13 @@ add_executable(
 
 target_include_directories(colibry-shell PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
+if(COLIBRYSHELL_AQ_HDR)
+  target_compile_definitions(colibry-shell PRIVATE COLIBRYSHELL_AQ_HDR=1)
+  message(STATUS "Aquamarine HDR API: found")
+else()
+  message(STATUS "Aquamarine HDR API: not found, HDR path disabled")
+endif()
+
 target_link_libraries(
   colibry-shell
   PRIVATE
@@ -156,8 +179,7 @@ Type=Application
 \")
 ")
 
-# Unit tests run head-less (no GPU, no Wayland session). Each test file is
-# its own executable because every test carries its own main().
+# Unit tests run head-less.
 include(CTest)
 if(BUILD_TESTING)
   add_executable(colibry-test-cloth

@@ -1,56 +1,62 @@
-# Colibry system configuration.
+# ColibryShell compositor configuration.
 #
-# Scalar settings live in sections. The list settings (monitors, bind)
-# stay at the top level. @PREFIX@ expands to the installation prefix
-# during install. User overrides belong in
-# ~/.config/colibry/colibry.toml.
+# Search order: /etc/colibry/colibry.toml, then
+# ~/.config/colibry/colibry.toml, then ./colibry.toml (repo checkout).
+# Later files override earlier ones; unknown keys are ignored.
 
-# Wallpaper rendered by the compositor itself (no external daemons).
+# Wallpaper rendered by the compositor itself.
 [wallpaper]
-path = "@PREFIX@/share/colibry/wallpapers/default.png"
-fit = "cover"            # "cover" crops to fill, "fit" shows the whole image
+path = ""            # empty = probe assets/ and the install prefix
+fit = "cover"        # "cover" fills the screen, "fit" shows the whole image
 
-# Pointer look and feel.
+# Pointer: size and speed are applied exactly as written here.
 [cursor]
-theme = ""               # empty = XCURSOR_THEME or "default"
-size = 16                # cursor size in pixels
-speed = 0.3              # motion multiplier, 1.0 = raw device deltas
+theme = "Adwaita"    # XCursor theme; empty = $XCURSOR_THEME or "default"
+size = 24            # sprite size in pixels
+speed = 1.0          # motion multiplier, 1.0 = raw device deltas
 
-# Focus and input behaviour.
+# Focus model.
 [input]
-follow_mouse = 1         # 1 = focus follows the pointer, 0 = click to focus
+follow_mouse = 1     # 1 = focus follows the pointer, 0 = click to focus
 
 # Programs used by default binds and the autostart terminal.
 [shell]
-terminal = ""            # empty = ghostty, then foot, kitty, alacritty, xterm
+terminal = ""        # empty = ghostty, then foot, kitty, alacritty, xterm
 
-# Constant soft shadow under every window.
+# Soft shadow under every window.
 [shadow]
 enabled = 1
 offset_x = 0
 offset_y = 12
-radius = 24              # blur radius in pixels
-rounding = 8           # corner rounding of the shadow silhouette
-opacity = 0.45           # 0.0 .. 1.0
+radius = 24          # blur radius in pixels
+rounding = 8         # silhouette corner rounding
+opacity = 0.45       # 0.0 .. 1.0
 
-# Server-side title bar drawn above every window.
+# Server-side titlebar.
 [titlebar]
 height = 32
 button_width = 46
-font = ""              # empty = first available system font
+font = ""            # empty = first available system font
 
-# Window corners: content, title bar and shadow share this radius.
+# Corners: content bottom, titlebar top and shadow share this radius.
 [window]
 rounding = 10
 
-# Startup animation and input lock.
-[login]
-fade_ms = 750            # screen brightening length
-unlock_ms = 250         # extra input lock after the fade ends
+# Rounded screen corners (pure black, untouchable arcs).
+[screen]
+rounding = 12        # 0 disables the mask
 
-# Monitor rules: "name,resolution,scale"; an empty name matches every
-# output; resolution is "preferred" or "WxH".
+# Startup: fade-in from black and the input grace period.
+[login]
+fade_ms = 2500       # desktop brightening length
+unlock_ms = 250      # input stays locked this long after start
+
+# HDR10 metadata on HDR-capable panels.
+[hdr]
+enabled = 1          # 1 = attach metadata when the panel reports HDR
+
+# Monitor rules: "name,resolution,scale"; empty name matches every output.
 monitors = []
 
-# Extra key binds on top of the defaults: "MOD+KEY=action".
+# Extra binds on top of the defaults: "MOD+KEY=action".
 bind = []

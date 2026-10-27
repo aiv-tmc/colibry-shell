@@ -1,13 +1,12 @@
 // Per-output presentation for the ColibryShell compositor.
 //
-// COutput owns one KMS buffer and drives the GPU frame: it merges the
-// accumulated damage, renders through CGLCompositor and commits the buffer
-// to the CRTC. Commits are page-flip aware: while a flip is pending no new
-// commit is attempted. Frame completion is signalled either by the
-// backend's frame event or, as a fallback for stacks that never deliver
-// it, by the frame timer in CCompositor; that is the point where
-// wl_surface.frame done callbacks go to clients. Rendering is
-// damage-driven, so a still desktop produces no work.
+// COutput owns a small pool of KMS buffers (three by default, growing to
+// four under sustained commit rejections) and rotates through it; every
+// buffer carries the damage backlog it missed, so each commit renders a
+// complete, tear-free frame. When HDR is enabled in the config and the
+// panel reports support, the output state carries static HDR10 metadata
+// (PQ transfer, D65 white, 1000-nit peak); otherwise the output stays in
+// SDR and the decision is logged.
 
 #pragma once
 
@@ -34,27 +33,22 @@ namespace ColibryShell {
         void present();
         void scheduleRender();
 
-        // True once the first frame committed; outputs that appear before
-        // the GPU renderer is ready stay unsetup until it is.
         bool presented() const { return m_presented; }
-
-        // True while a page-flip for the last commit is still in flight.
         bool framePending() const { return m_framePending; }
+        bool hdrActive() const { return m_hdrActive; }
 
-        // Marks the next frame as fully damaged (cheap path; the wallpaper
-        // is NOT re-rasterized).
         void invalidateBackground();
-
-        // Forces a wallpaper re-rasterization and a full redraw; used when
-        // the wallpaper image itself changed at runtime.
         void reloadBackground();
 
         bool     needsRender() const;
         uint64_t lastCommitMs() const;
 
-        // Treats the pending flip as completed: fires frame-done to
-        // clients and, with pending damage, commits the next frame. Called
-        // by the backend's frame event and by the frame timer fallback.
+        uint64_t frameEvents() const { return m_frameEvents; }
+        uint64_t safetyNets() const { return m_safetyNets; }
+        uint64_t rejections() const { return m_rejections; }
+        int      bufferCount() const { return m_bufferCount; }
+        int      pendingDamageRects() const;
+
         void recoverFrame();
 
         void onBackendDestroy();
@@ -63,19 +57,30 @@ namespace ColibryShell {
         Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> aq() const;
 
       private:
+        static constexpr int MAX_BUFFERS = 4;
+
         Hyprutils::Memory::CSharedPointer<Aquamarine::SOutputMode> pickMode() const;
         const SMonitorRule*                                        matchingRule() const;
-        bool allocateBuffer(const Hyprutils::Math::Vector2D& pixelSize);
+        bool allocateBuffers(const Hyprutils::Math::Vector2D& pixelSize);
+        bool growBufferPool();
         void rebuildBackground();
         void onFrame();
+        void tryEnableHDR();
 
         Hyprutils::Memory::CSharedPointer<Aquamarine::IOutput> m_output;
-        Hyprutils::Memory::CSharedPointer<Aquamarine::IBuffer> m_buffer;
+
+        Hyprutils::Memory::CSharedPointer<Aquamarine::IBuffer> m_buffers[MAX_BUFFERS];
+        int                                                    m_bufferCount = 3;
+        int                                                    m_bufferIndex  = 0;
+
+        Hyprutils::Math::CRegion m_pendingDamage[MAX_BUFFERS];
 
         Hyprutils::Math::Vector2D m_pixelSize;
 
         std::vector<uint32_t> m_backgroundPixels;
         bool                  m_backgroundDirty = true;
+
+        bool m_hdrActive = false;
 
         bool m_needsRender  = true;
         bool m_fullRedraw   = true;
@@ -86,7 +91,10 @@ namespace ColibryShell {
         uint64_t m_nextCommitMs     = 0;
         uint64_t m_lastCommitMs     = 0;
         uint64_t m_lastFrameEventMs = 0;
-        int      m_failures         = 0;
+
+        uint64_t m_frameEvents = 0;
+        uint64_t m_safetyNets  = 0;
+        uint64_t m_rejections  = 0;
 
         Hyprutils::Signal::CHyprSignalListener m_destroyListener;
         Hyprutils::Signal::CHyprSignalListener m_frameListener;

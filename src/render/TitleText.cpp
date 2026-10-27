@@ -21,24 +21,28 @@ namespace ColibryShell {
             FT_Face    s_face    = nullptr;
             int32_t    s_glyphH  = 16;
 
-            // Blends one premultiplied-ish RGBA glyph pixel into the buffer.
+            // Premultiplied blending of a straight-alpha source pixel into
+            // the buffer, matching the GPU's GL_ONE blend convention.
             void blendPixel(std::vector<uint32_t>& buf, int32_t w, int32_t h, int32_t x, int32_t y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
                 if (x < 0 || y < 0 || x >= w || y >= h || a == 0)
                     return;
 
-                uint32_t& dst = buf[y * w + x];
-                const uint8_t da = (dst >> 24) & 0xFF;
-                const uint8_t dr = (dst >> 16) & 0xFF;
-                const uint8_t dg = (dst >> 8) & 0xFF;
-                const uint8_t db = dst & 0xFF;
+                uint32_t&      dst = buf[y * w + x];
+                const uint32_t da  = (dst >> 24) & 0xFF;
+                const uint32_t dr  = (dst >> 16) & 0xFF;
+                const uint32_t dg  = (dst >> 8) & 0xFF;
+                const uint32_t db  = dst & 0xFF;
 
-                const float sa = a / 255.0f;
-                const float ia = 1.0f - sa;
-                dst = (std::min(255, (int)(a + da * ia)) << 24) | (std::min(255, (int)(r + dr * ia)) << 16) |
-                      (std::min(255, (int)(g + dg * ia)) << 8) | std::min(255, (int)(b + db * ia));
+                const uint32_t sa  = a;
+                const uint32_t sr  = (uint32_t)r * sa / 255;
+                const uint32_t sg  = (uint32_t)g * sa / 255;
+                const uint32_t sb  = (uint32_t)b * sa / 255;
+                const uint32_t inv = 255 - sa;
+
+                dst = (std::min(255u, sa + da * inv / 255) << 24) | (std::min(255u, sr + dr * inv / 255) << 16) |
+                      (std::min(255u, sg + dg * inv / 255) << 8) | std::min(255u, sb + db * inv / 255);
             }
 
-            // Draws one text line left-aligned at (x, yBaseline) in white.
             void drawText(std::vector<uint32_t>& buf, int32_t w, int32_t h, const std::string& text, int32_t x, int32_t yBaseline, int32_t maxRight) {
                 if (!s_face)
                     return;
@@ -63,7 +67,6 @@ namespace ColibryShell {
                 }
             }
 
-            // Draws a thick anti-aliased line segment in white.
             void stroke(std::vector<uint32_t>& buf, int32_t w, int32_t h, float x0, float y0, float x1, float y1, float thick) {
                 const int minX = std::max(0, (int)std::floor(std::min(x0, x1) - thick));
                 const int maxX = std::min(w - 1, (int)std::ceil(std::max(x0, x1) + thick));
@@ -86,8 +89,6 @@ namespace ColibryShell {
                 }
             }
 
-            // Draws one titlebar button glyph without any background:
-            // 0 = minimize (dash), 1 = maximize (rectangle), 2 = close (cross).
             void drawButtonGlyph(std::vector<uint32_t>& buf, int32_t w, int32_t h, int32_t cx, int32_t cy, int32_t half, int kind) {
                 const float t = 1.6f;
                 if (kind == 0) {
@@ -133,8 +134,7 @@ namespace ColibryShell {
             return true;
         }
 
-        void rasterizeOverlay(const std::string& title, int32_t width, int32_t height, int32_t buttonsWidth, int hover,
-                              std::vector<uint32_t>& out) {
+        void rasterizeOverlay(const std::string& title, int32_t width, int32_t height, int32_t buttonsWidth, int hover, std::vector<uint32_t>& out) {
             out.assign((size_t)width * height, 0);
             if (!s_face)
                 return;
